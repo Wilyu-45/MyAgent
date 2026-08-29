@@ -1,0 +1,24 @@
+[
+  {
+    "id": "qwen3.5-9b-uncensored",
+    "model_path": "models/model1/Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-MTP-Q4_K_M.gguf",
+    "mmproj_path": "models/model1/mmproj-BF16.gguf",
+    "chat_handler": "qwen2.5vl",
+    "n_ctx": 32768,
+    "n_gpu_layers": 20,
+    "n_batch": 512,
+    "use_mmap": true,
+    "use_mlock": false
+  },
+  {
+    "id": "qwythos-9b-claude",
+    "model_path": "models/model2/Qwythos-9B-Claude-Mythos-5-1M-uncensored-heretic-Q5_K_M.gguf",
+    "mmproj_path": "models/model2/Qwythos-9B-Claude-Mythos-5-1M-uncensored-heretic-mmproj-BF16.gguf",
+    "chat_handler": "qwen2.5vl",
+    "n_ctx": 32768,
+    "n_gpu_layers": 20,
+    "n_batch": 512,
+    "use_mmap": true,
+    "use_mlock": false
+  }
+]

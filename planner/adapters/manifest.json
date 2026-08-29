@@ -1,0 +1,58 @@
+{
+  "$comment": "Agent 框架清单 (单一数据源)。新增/更新框架只改这里 + 对应适配器文件。",
+  "frameworks": {
+    "langgraph": {
+      "adapter": "langgraph_agent",
+      "venv": "myagent",
+      "packages": ["langgraph", "langchain-openai"],
+      "verify": { "goal": "1+1等于几?只回答数字", "max_steps": 4 },
+      "notes": "状态图编排核心 (默认框架)"
+    },
+    "pydantic-ai": {
+      "adapter": "pydantic_ai_agent",
+      "venv": "myagent",
+      "packages": ["pydantic-ai"],
+      "verify": { "goal": "1+1等于几?只回答数字", "max_steps": 4 },
+      "notes": "类型安全 Agent, 结构化输出+原生工具调用"
+    },
+    "smolagents": {
+      "adapter": "smolagents_agent",
+      "venv": "myagent",
+      "packages": ["smolagents"],
+      "verify": { "goal": "1+1等于几?只回答数字", "max_steps": 4 },
+      "notes": "HuggingFace 代码优先 Agent"
+    },
+    "llamaindex": {
+      "adapter": "llamaindex_agent",
+      "venv": "myagent",
+      "packages": ["llama-index-core", "llama-index-llms-openai", "llama-index-llms-openai-like"],
+      "import_name": "llama_index.core",
+      "verify": { "goal": "1+1等于几?只回答数字", "max_steps": 4 },
+      "notes": "LlamaIndex AgentWorkflow"
+    },
+    "mcp": {
+      "adapter": "mcp_agent",
+      "venv": "myagent",
+      "packages": ["mcp", "fastmcp-slim[server]"],
+      "pinned": ["mcp==1.29.0"],
+      "verify": { "goal": "列出当前目录文件", "max_steps": 4 },
+      "notes": "MCP 协议客户端, 动态发现服务器工具 (mcp 锁定 1.29: fastmcp-slim 3.4.7 尚不支持 mcp 2.x)"
+    },
+    "crewai": {
+      "adapter": "crewai_agent",
+      "venv": "myagent_crewai",
+      "packages": ["crewai"],
+      "runner": true,
+      "verify": { "goal": "1+1等于几?只回答数字", "max_steps": 4 },
+      "notes": "角色团队 (隔离 venv, 依赖冲突隔离)"
+    },
+    "autogen": {
+      "adapter": "autogen_agent",
+      "venv": "myagent_autogen",
+      "packages": ["autogen-agentchat", "autogen-ext[openai]"],
+      "runner": true,
+      "verify": { "goal": "1+1等于几?只回答数字", "max_steps": 4 },
+      "notes": "Microsoft AutoGen (隔离 venv)"
+    }
+  }
+}

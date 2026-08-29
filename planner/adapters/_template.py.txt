@@ -1,0 +1,33 @@
+"""新框架适配器模板 (由 `python -m planner.frameworks add` 复制生成)。"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+from .base import make_result
+
+FRAMEWORK = "__FRAMEWORK__"
+
+
+def run(
+    goal: str,
+    model: Optional[str] = None,
+    max_steps: Optional[int] = None,
+    verbose: bool = False,
+    **kwargs,
+) -> dict:
+    """用 __FRAMEWORK__ 框架完成 goal, 返回统一结果结构。
+
+    实现要点 (参考 planner/adapters/smolagents_agent.py):
+      1. 用该框架的客户端对接本地 modelservice:
+         base_url = settings.LLM_BASE_URL (http://127.0.0.1:8000/v1)
+         model    = model or settings.LLM_MODEL
+      2. 工具: from .tool_wrappers import build_typed_tools  (类型化工具)
+      3. 返回: make_result(FRAMEWORK, goal, status=..., final_answer=..., steps=...)
+      4. 需要独立 venv (依赖冲突) 时, 参考 crewai_agent/autogen_agent 的子进程方案。
+    """
+    # TODO: 实现你的适配器
+    return make_result(
+        FRAMEWORK, goal, status="error",
+        final_answer="适配器尚未实现, 请编辑 planner/adapters/__FRAMEWORK___agent.py",
+    )

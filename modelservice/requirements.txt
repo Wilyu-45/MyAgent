@@ -1,0 +1,17 @@
+# ===== Web 框架 =====
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+
+# ===== 数据模型 =====
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# ===== 本地推理 (GGUF) =====
+# Windows + NVIDIA GPU: pip install llama-cpp-python --index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+# Windows + CPU only  : pip install llama-cpp-python
+# macOS (Metal)      : CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python
+llama-cpp-python>=0.2.90
+
+# ===== 图像处理(多模态) =====
+Pillow>=10.0.0

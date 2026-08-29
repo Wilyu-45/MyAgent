@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 本地虚拟环境
+myagent/
+myagent_autogen/
+myagent_crewai/
+
+# 大模型权重文件
+modelservice/models/
+
+# 第三方仓库
+dify/
+dify-agent/
+dify-agent-runtime/
+openagent/
+tools/
