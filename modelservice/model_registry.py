@@ -14,7 +14,9 @@ models.json 每项字段:
   model_path    (必填) GGUF 模型文件路径
   mmproj_path   (可选) 多模态投影文件,缺失则纯文本
   chat_handler  (可选) qwen2.5vl | llava15 | llava16 | none
-  n_ctx / n_threads / n_gpu_layers / n_batch / use_mmap / use_mlock (可选)
+  n_ctx / n_threads / n_gpu_layers / n_batch / n_ubatch / use_mmap / use_mlock (可选)
+  flash_attn    (可选, 默认 true) FlashAttention, 长上下文必开
+  type_k/type_v (可选, 默认 "Q8_0") KV cache 量化: "F16" | "Q8_0" | "Q4_0"
 """
 from __future__ import annotations
 
@@ -166,12 +168,21 @@ class SimpleTextChatHandler:
                 content = "".join(
                     p.get("text", "") for p in content if isinstance(p, dict)
                 )
+            if role == "assistant" and not str(content).startswith("<think>"):
+                # 与末尾 prefill 保持逐字节一致,保证下一轮 prompt 前缀完整命中
+                # KV cache(qwen35 混合架构的 SSM 状态无法部分回退,前缀差一个
+                # token 就会触发全量重算)。这也是 Qwen3 官方 non-thinking
+                # 模板渲染历史 assistant 轮次的标准做法。
+                content = "<think>\n\n</think>\n\n" + str(content)
             parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
-        parts.append("<|im_start|>assistant\n")
+        # 生成 prefill 必须是单个 part 且与上方 assistant 历史渲染逐字节一致:
+        # "<|im_start|>assistant\n" + 空think块。若拆成两个 part,"\n".join 会在
+        # 中间多出一个换行,下一轮 prompt 前缀差一个 token,
+        # qwen35 混合架构的 SSM 状态无法部分回退 → 触发全量重算(KV cache 失效)。
         # 预置空 think 块:Qwen3 系模型看到 <think>\n\n</think> 会跳过思考直接作答。
         # 否则在复杂系统提示词(如 DSH 的 agent 提示词)下,模型大概率陷入超长思考,
         # 把 max_tokens 全部耗尽导致回答被截断("已达到输出 token 上限")。
-        parts.append("<think>\n\n</think>\n\n")
+        parts.append("<|im_start|>assistant\n<think>\n\n</think>\n\n")
         extra_kwargs = {}
         if force_json:
             # 客户端要求 JSON 输出: 用 GBNF grammar 强制合法 JSON
@@ -412,6 +423,21 @@ class ModelRegistry:
                 self._in_flight[model_id] = cnt - 1
 
     # ---------------- 加载 / 卸载 ----------------
+    @staticmethod
+    def _resolve_kv_type(v) -> int:
+        """把 models.json 中的 KV cache 类型解析为 GGML 枚举。
+        支持 "F16" | "Q8_0" | "Q4_0" 字符串或直接传 int。"""
+        import llama_cpp
+        from llama_cpp import GGML_TYPE_F16
+        if isinstance(v, int):
+            return v
+        name = str(v).upper().replace("GGML_TYPE_", "")
+        t = getattr(llama_cpp, f"GGML_TYPE_{name}", None)
+        if t is None:
+            logger.warning("未知 KV cache 类型 %r,回退 F16", v)
+            return GGML_TYPE_F16
+        return t
+
     async def _load(self, cfg: dict):
         from llama_cpp import Llama
         loop = asyncio.get_running_loop()
@@ -428,9 +454,22 @@ class ModelRegistry:
             n_threads=cfg.get("n_threads", settings.N_THREADS),
             n_gpu_layers=cfg.get("n_gpu_layers", settings.N_GPU_LAYERS),
             n_batch=cfg.get("n_batch", settings.N_BATCH),
+            n_ubatch=cfg.get("n_ubatch", settings.N_UBATCH),
             use_mmap=cfg.get("use_mmap", settings.USE_MMAP),
             use_mlock=cfg.get("use_mlock", settings.USE_MLOCK),
+            # ---- 长上下文: FlashAttention + KV cache 量化 ----
+            # FA 同时减小注意力计算缓冲并支持 V 量化;Q8_0 KV 质量损失可忽略,
+            # 是 8GB 显卡跑 256K+ 上下文的核心手段。
+            flash_attn=bool(cfg.get("flash_attn", settings.FLASH_ATTN)),
+            type_k=self._resolve_kv_type(cfg.get("type_k", settings.TYPE_K)),
+            type_v=self._resolve_kv_type(cfg.get("type_v", settings.TYPE_V)),
             verbose=False,
+        )
+        logger.info(
+            "  加载参数: n_ctx=%s n_gpu_layers=%s flash_attn=%s type_k/v=%s/%s n_batch/ubatch=%s/%s",
+            kwargs["n_ctx"], kwargs["n_gpu_layers"], kwargs["flash_attn"],
+            cfg.get("type_k", settings.TYPE_K), cfg.get("type_v", settings.TYPE_V),
+            kwargs["n_batch"], kwargs["n_ubatch"],
         )
 
         def _do_load():
