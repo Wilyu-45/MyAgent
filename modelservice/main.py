@@ -217,6 +217,18 @@ async def unload_model(model_id: str):
     return {"model": model_id, "unloaded": unloaded}
 
 
+@app.post("/v1/models/{model_id}/load")
+async def load_model(model_id: str):
+    """预热模型(提前上 VRAM)。实时聊天场景可在服务启动后调用,
+    避免首个请求承担冷加载延迟;已加载时立即返回。"""
+    reg = _reg()
+    if not reg.has(model_id):
+        raise HTTPException(404, f"Unknown model: {model_id}")
+    llm = await reg.acquire(model_id)
+    await reg.release(model_id)
+    return {"model": model_id, "loaded": True}
+
+
 # ============================================================
 # /v1/chat/completions  (非流式)
 # ============================================================
