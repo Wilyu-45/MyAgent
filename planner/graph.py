@@ -5,12 +5,14 @@ LangGraph 状态图: ReAct 循环 (规划 → 工具执行 → 反思)
   call_model   -> 调用 LLM, 生成 ReAct 决策 (JSON)
   execute_tool -> 解析动作, 分发到工具注册表, 结果回填对话
   ask_retry    -> 输出无法解析时, 追加纠错消息重试
+  wrap_up      -> 达到步数上限时, 请求模型收尾 (仅一次; 再失败强制 finalize)
   finalize     -> 收尾: 记录状态, 走向 END
 
 边:
   START -> call_model
   call_model --(tool)--> execute_tool --> call_model   (循环)
   call_model --(retry)--> ask_retry --> call_model     (重试)
+  call_model --(wrap_up)--> wrap_up --> call_model     (收尾提醒, 只发一次)
   call_model --(finish|error)--> finalize --> END
 """
 from __future__ import annotations
@@ -85,6 +87,12 @@ def _make_finalize() -> Callable[[AgentState], dict]:
             obj = parse_llm_json(last.content)
             if obj and obj.get("final_answer"):
                 return {"status": "finished", "final_answer": str(obj["final_answer"])}
+            if obj and str(obj.get("action")) == "final_answer":
+                # 容错: 从工具调用形式的最终答复中提取内容
+                args = obj.get("action_input") or {}
+                answer = args.get("final_answer") or args.get("answer") or obj.get("thought")
+                if answer:
+                    return {"status": "finished", "final_answer": str(answer)}
         if state.get("status") == "error":
             return {"status": "error"}
         return {
@@ -113,10 +121,13 @@ def _route(state: AgentState) -> str:
         return "retry" if state.get("retries_left", 0) > 0 else "error"
     if "final_answer" in obj:
         return "finish"
+    if str(obj.get("action")) == "final_answer":
+        # 容错: 部分模型把最终答复写成工具调用形式 {"action": "final_answer", "action_input": {...}}
+        return "finish"
     if "action" in obj:
         if state.get("step", 0) >= state.get("max_steps", 8):
-            # 步数上限: 先追加提醒, 让模型输出 final_answer 收尾
-            return "wrap_up"
+            # 步数上限: 只追加一次收尾提醒; 模型仍不收尾则强制 finalize, 防止死循环
+            return "finish" if state.get("wrap_up_done") else "wrap_up"
         return "tool"
     return "error"
 
@@ -131,7 +142,8 @@ def _make_wrap_up() -> Callable[[AgentState], dict]:
                         '直接输出 {"thought": "...", "final_answer": "对当前进展的总结"}。'
                     )
                 )
-            ]
+            ],
+            "wrap_up_done": True,
         }
     return wrap_up
 

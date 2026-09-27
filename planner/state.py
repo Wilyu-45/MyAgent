@@ -22,3 +22,4 @@ class AgentState(TypedDict, total=False):
     final_answer: str                               # 最终答复
     status: str                                     # running | finished | max_steps_exceeded | error
     retries_left: int                               # JSON 解析失败时的重试次数
+    wrap_up_done: bool                              # 已达步数上限且追加过收尾提醒 (只提醒一次)

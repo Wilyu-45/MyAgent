@@ -191,6 +191,15 @@ details.raw summary { cursor: pointer; color: #9ca3af; font-size: 12px; }
 .final.warn { background: #fffbeb; border-color: #fde68a; }
 .final.err { background: #fef2f2; border-color: #fecaca; }
 
+/* 多轮对话: 继续入口 (任务完成后) */
+.continue-row { margin-top: 8px; }
+.continue-box { display: flex; gap: 8px; align-items: flex-end; margin-top: 6px; }
+.continue-input {
+  flex: 1; resize: vertical; min-height: 34px; max-height: 140px;
+  padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 9px;
+  font: inherit; line-height: 1.5;
+}
+
 /* ---------- Chat 对话 ---------- */
 #chat-messages { display: flex; flex-direction: column; gap: 12px; }
 .bubble-row { display: flex; gap: 10px; align-items: flex-start; }
@@ -211,6 +220,46 @@ details.raw summary { cursor: pointer; color: #9ca3af; font-size: 12px; }
 .bubble.typing::after { content: "▌"; color: #94a3b8; animation: blink 1s steps(2) infinite; }
 .bubble.stopped::after { content: "（已停止）"; margin-left: 6px; color: #9ca3af; font-size: 12px; }
 @keyframes blink { 50% { opacity: 0; } }
+
+/* Markdown 渲染 (助手气泡): 块级样式紧凑化 */
+.bubble.md { white-space: normal; }
+.bubble.md > :first-child { margin-top: 0; }
+.bubble.md > :last-child { margin-bottom: 0; }
+.bubble.md p { margin: 6px 0; }
+.bubble.md h1, .bubble.md h2, .bubble.md h3 { margin: 10px 0 6px; line-height: 1.35; }
+.bubble.md h1 { font-size: 17px; }
+.bubble.md h2 { font-size: 16px; }
+.bubble.md h3 { font-size: 15px; }
+.bubble.md ul, .bubble.md ol { margin: 6px 0; padding-left: 22px; }
+.bubble.md li { margin: 2px 0; }
+.bubble.md code {
+  background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0 4px;
+  font: 12.5px/1.5 Consolas, "Courier New", monospace;
+}
+.bubble.md pre {
+  background: #0f172a; color: #e2e8f0; padding: 10px 12px; border-radius: 8px;
+  overflow-x: auto; margin: 8px 0;
+}
+.bubble.md pre code { background: none; border: none; color: inherit; padding: 0; }
+.bubble.md blockquote { margin: 8px 0; padding: 2px 10px; border-left: 3px solid #cbd5e1; color: #475569; }
+.bubble.md hr { border: none; border-top: 1px solid #e2e8f0; margin: 10px 0; }
+.bubble.md a { color: #2563eb; text-decoration: none; }
+.bubble.md a:hover { text-decoration: underline; }
+
+/* 行操作 (重试/编辑): 悬停或聚焦时显示 */
+.bubble-row .msg-actions { flex: none; align-self: center; opacity: 0; transition: opacity .12s; }
+.bubble-row:hover .msg-actions, .bubble-row:focus-within .msg-actions { opacity: 1; }
+#chatview.busy .msg-actions, .bubble-row.editing .msg-actions { display: none; }
+button.mini { padding: 2px 8px; border-radius: 6px; font-size: 12px; }
+
+/* 用户消息行内编辑 */
+.edit-box { flex: 1; max-width: 78%; display: flex; flex-direction: column; gap: 6px; }
+.edit-input {
+  width: 100%; min-height: 64px; resize: vertical;
+  padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 10px;
+  font: inherit; line-height: 1.6;
+}
+.edit-actions { display: flex; gap: 8px; }
 
 /* ---------- 输入区 ---------- */
 .composer {

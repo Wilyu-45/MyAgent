@@ -8,6 +8,8 @@ Web 交互界面冒烟测试 (对应 UI_DESIGN.md 验收用例)
     myagent\\Scripts\\python.exe -m interface.webui.test_e2e
     # 也可通过环境变量指向其他端口/实例 (如 mock 服务跑在 8101):
     $env:WEBUI_BASE="http://127.0.0.1:8101"; myagent\\Scripts\\python.exe -m interface.webui.test_e2e
+    # 令牌模式 (服务带 --token 启动): 额外设置 WEBUI_TOKEN 后同样可验收
+    $env:WEBUI_TOKEN="你的令牌"; myagent\\Scripts\\python.exe -m interface.webui.test_e2e
 
 说明: modelservice 在线时额外验证 profile 字段与 Chat 真实流式对话;
 离线时验证 Agent 全流程与 Chat 的错误兜底, 用例自动降级不失败。
@@ -22,13 +24,21 @@ import urllib.error
 import urllib.request
 
 BASE = os.getenv("WEBUI_BASE", "http://127.0.0.1:8100")
+TOKEN = os.getenv("WEBUI_TOKEN", "")   # 服务启用 --token 时附带 Authorization 头
+
+
+def _auth_headers(extra: dict | None = None) -> dict:
+    h = dict(extra or {})
+    if TOKEN:
+        h["Authorization"] = f"Bearer {TOKEN}"
+    return h
 
 
 def _req(path: str, body: dict | None = None, method: str = "GET", timeout: float = 10.0):
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(
         BASE + path, data=data, method=method,
-        headers={"Content-Type": "application/json"} if data else {},
+        headers=_auth_headers({"Content-Type": "application/json"} if data else {}),
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -43,7 +53,7 @@ def post_sse(path: str, body: dict, timeout: float = 600.0) -> list[dict]:
     """POST 并解析 SSE 流; 读到 done/error 或无数据为止, 返回事件字典列表。"""
     req = urllib.request.Request(
         BASE + path, data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"}, method="POST",
+        headers=_auth_headers({"Content-Type": "application/json"}), method="POST",
     )
     frames: list[dict] = []
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -111,7 +121,8 @@ def main() -> None:
 
     # 3) SSE 流式
     _, t2 = _req("/api/tasks", {"goal": "冒烟2: SSE 流", "framework": "langgraph"}, method="POST")
-    req = urllib.request.Request(f"{BASE}/api/tasks/{t2['task_id']}/events?after_seq=0")
+    req = urllib.request.Request(f"{BASE}/api/tasks/{t2['task_id']}/events?after_seq=0",
+                                 headers=_auth_headers())
     frames: list[str] = []
     with urllib.request.urlopen(req, timeout=20) as r:
         check("SSE Content-Type", r.headers["Content-Type"].startswith("text/event-stream"))
@@ -132,7 +143,8 @@ def main() -> None:
           str([e["type"] for e in snap3["events"]]))
 
     # 5) 已关闭任务续传: 回放耗尽后补发 close (断线重连兜底)
-    req = urllib.request.Request(f"{BASE}/api/tasks/{t['task_id']}/events?after_seq=99999")
+    req = urllib.request.Request(f"{BASE}/api/tasks/{t['task_id']}/events?after_seq=99999",
+                                 headers=_auth_headers())
     with urllib.request.urlopen(req, timeout=5) as r:
         body = r.read().decode("utf-8")
     check("已关闭任务 after_seq 超尾仍补发 close", "event: close" in body)

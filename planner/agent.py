@@ -33,12 +33,14 @@ class Agent:
         max_steps: Optional[int] = None,
         verbose: bool = False,
         approval: Optional[Callable[[dict], bool]] = None,
+        checkpointer: Optional[Any] = None,
     ):
         self.llm = llm if llm is not None else build_llm(model=model)
         self.registry = registry or default_registry(approval=approval)
         self.max_steps = max_steps or settings.MAX_STEPS
         self.verbose = verbose
-        self.graph = build_agent(self.llm, self.registry)
+        # checkpointer: 外部共享检查点 (多轮续跑); 默认每个实例独立 MemorySaver
+        self.graph = build_agent(self.llm, self.registry, checkpointer=checkpointer)
 
     # ---------------- 运行 ----------------
     def run(
@@ -70,6 +72,7 @@ class Agent:
             "final_answer": "",
             "status": "running",
             "retries_left": 2,
+            "wrap_up_done": False,   # 每轮重置, 保证续跑时收尾提醒可用
         }
 
         # 流式执行: 逐节点输出 (verbose 时打印; on_event 时派生界面事件)

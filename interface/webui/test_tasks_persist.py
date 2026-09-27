@@ -120,9 +120,11 @@ def main() -> None:
         check("重启后历史恢复", len(r2) == 1 and r2[0]["task_id"] == t1.task_id
               and r2[0]["status"] == "finished", str(r2))
         snap_re = m2.snapshot(t1.task_id)
-        check("重启后快照与落盘前一致", snap_re is not None
+        expect_result = dict(snap1["result"] or {})
+        expect_result.pop("thread_id", None)  # 检查点随进程消亡, 恢复时清洗续跑痕迹
+        check("重启后快照与落盘前一致 (仅清洗续跑痕迹)", snap_re is not None
               and [e["seq"] for e in snap_re["events"]] == [e["seq"] for e in snap1["events"]]
-              and snap_re["result"] == snap1["result"])
+              and snap_re["result"] == expect_result)
         q, backlog = m2.subscribe(t1.task_id, 0)
         check("重启后回看事件可重放", q is None and len(backlog) == len(snap_re["events"]))
         check("重启后终态任务不可取消", m2.cancel(t1.task_id) is False)
@@ -193,11 +195,22 @@ def main() -> None:
         check("超过上限的合成历史全部载入", len(m4.recent(100)) == n_syn)
         d1, _ = m4.submit("落盘测试 4", "langgraph", None, 4)
         _wait_status(m4, d1.task_id, "finished")
-        ok, payload4 = _poll(lambda: _load(syn), 5)
-        ids = [x["task_id"] for x in payload4.get("tasks", [])] if ok else []
-        check(f"新任务触发裁剪至 {MAX_HISTORY} 条并同步落盘", ok and len(ids) == MAX_HISTORY
-              and d1.task_id in ids and "t-syn00" not in ids and f"t-syn{n_syn - 1:02d}" in ids,
-              f"len={len(ids)}")
+        seen: dict = {}
+
+        def synced_to_limit():
+            """等待裁剪同步落盘: 文件可读但仍是旧记录时继续等, 达标才返回。"""
+            try:
+                payload = _load(syn)
+            except Exception:  # noqa: BLE001 — 写入瞬间读取失败, 重试即可
+                return None
+            seen["len"] = len(payload.get("tasks", []))
+            return payload if seen["len"] == MAX_HISTORY else None
+
+        ok, payload4 = _poll(synced_to_limit, 5)
+        ids = [x["task_id"] for x in (payload4 or {}).get("tasks", [])]
+        check(f"新任务触发裁剪至 {MAX_HISTORY} 条并同步落盘", ok and d1.task_id in ids
+              and "t-syn00" not in ids and f"t-syn{n_syn - 1:02d}" in ids,
+              f"len={seen.get('len')}")
         _shutdown(m4, loop4)
 
     print(f"\n{PASSED} 通过, {FAILED} 失败")

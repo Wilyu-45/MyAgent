@@ -6,11 +6,13 @@ Web 交互界面服务 (FastAPI) — interface.webui
 - Chat 模式: 直连 modelservice 流式对话 (chat 配置模型, 见 models.json profile 字段)
 - 模型服务查询由服务端代理 (modelservice 无 CORS, 避免跨端口直连)
 
-运行: python -m interface.webui [--port 8100] [--mock] [--workers N]
+运行: python -m interface.webui [--port 8100] [--mock] [--workers N] [--token [TOKEN]]
+- 访问令牌: 启用后 /api/* 与 /health 需携带令牌 (静态页公开); 局域网访问 (--host 0.0.0.0) 必配
 """
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -42,6 +44,7 @@ class TaskCreate(BaseModel):
     framework: str = "langgraph"
     model: Optional[str] = None
     max_steps: Optional[int] = Field(default=None, ge=1, le=50)
+    thread_id: Optional[str] = Field(default=None, max_length=64)   # 多轮续跑标识 (langgraph)
 
 
 class ApprovalDecision(BaseModel):
@@ -64,6 +67,24 @@ class ChatRequest(BaseModel):
 
 def _err(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
+
+
+def _token_from_request(request: Request) -> Optional[str]:
+    """按优先级提取访问令牌: Authorization Bearer → X-Auth-Token 头 → webui_token cookie → ?token= 参数。
+
+    多通道原因: 前端 fetch 注入请求头; EventSource 无法自定义头, 用同源 cookie;
+    命令行 (curl) 与首次分享链接用查询参数。
+    """
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    xt = request.headers.get("x-auth-token")
+    if xt:
+        return xt.strip()
+    ck = request.cookies.get("webui_token")
+    if ck:
+        return ck
+    return request.query_params.get("token")
 
 
 def _sse(ev: dict) -> bytes:
@@ -90,11 +111,14 @@ def _model_profiles() -> dict[str, str]:
         return {}
 
 
-def create_app(mock: bool = False, workers: int = 1) -> FastAPI:
+def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None) -> FastAPI:
+    token = (token or "").strip() or None   # 空串视为未启用
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.manager = TaskManager(asyncio.get_running_loop(), mock=mock, workers=workers)
-        logger.info("界面服务已启动 (mock=%s, workers=%d)", mock, workers)
+        logger.info("界面服务已启动 (mock=%s, workers=%d, token=%s)",
+                    mock, workers, "已启用" if token else "未启用")
         try:
             yield
         finally:
@@ -107,6 +131,24 @@ def create_app(mock: bool = False, workers: int = 1) -> FastAPI:
         version="1.1.0",
         lifespan=lifespan,
     )
+
+    # ==================== 访问令牌 ====================
+    # 启用后 /api/* 与 /health 需携带令牌; 静态页公开 (页面无数据, 支持先打开页面再带令牌访问)
+    if token:
+        def _authorized(request: Request) -> bool:
+            got = _token_from_request(request) or ""
+            # 常数时间比较, 避免时序侧信道
+            return bool(got) and hmac.compare_digest(got.encode("utf-8"), token.encode("utf-8"))
+
+        @app.middleware("http")
+        async def auth_guard(request: Request, call_next):
+            path = request.url.path
+            if (path.startswith("/api/") or path == "/health") and not _authorized(request):
+                resp = _err(401, "unauthorized",
+                            "无效或缺失的访问令牌 (可用 Authorization: Bearer 头 / webui_token cookie / ?token= 参数)")
+                resp.headers["WWW-Authenticate"] = "Bearer"
+                return resp
+            return await call_next(request)
 
     def mgr() -> TaskManager:
         return app.state.manager
@@ -202,7 +244,8 @@ def create_app(mock: bool = False, workers: int = 1) -> FastAPI:
         goal = req.goal.strip()
         if not goal:
             return _err(422, "empty_goal", "任务目标不能为空")
-        task, position = mgr().submit(goal, req.framework, req.model, req.max_steps)
+        task, position = mgr().submit(goal, req.framework, req.model, req.max_steps,
+                                      thread_id=req.thread_id)
         return {"task_id": task.task_id, "queued": task.status == "queued",
                 "queue_position": position}
 
@@ -300,6 +343,7 @@ def create_app(mock: bool = False, workers: int = 1) -> FastAPI:
             "running": mgr().running_ids(),
             "workers": workers,
             "mock": mock,
+            "auth": bool(token),
         }
 
     @app.get("/health")
