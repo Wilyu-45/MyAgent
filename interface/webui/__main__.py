@@ -1,8 +1,9 @@
 """
-界面服务入口: python -m interface.webui [--host] [--port] [--mock] [--open]
+界面服务入口: python -m interface.webui [--host] [--port] [--mock] [--workers N] [--open]
 
 示例:
-    python -m interface.webui                 # 127.0.0.1:8100
+    python -m interface.webui                 # 127.0.0.1:8100 (任务串行)
+    python -m interface.webui --workers 2     # 任务并行 (2 个工作线程)
     python -m interface.webui --open          # 启动后自动打开浏览器
     python -m interface.webui --mock --open   # Agent 任务离线演示 (无需 modelservice)
 """
@@ -23,6 +24,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8100, help="监听端口 (默认 8100)")
     parser.add_argument("--mock", action="store_true",
                         help="Agent 任务离线演示: 脚本化 LLM 跑通全流程, 不依赖模型服务")
+    parser.add_argument("--workers", type=int, default=1, metavar="N",
+                        help="任务并行工作线程数 (默认 1, 遵守单卡 VRAM 约束)")
     parser.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
     args = parser.parse_args()
 
@@ -35,7 +38,8 @@ def main() -> None:
         url = f"http://{host}:{args.port}"
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 
-    uvicorn.run(create_app(mock=args.mock), host=args.host, port=args.port, log_level="info")
+    uvicorn.run(create_app(mock=args.mock, workers=args.workers),
+                host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":

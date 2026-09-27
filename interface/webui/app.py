@@ -2,11 +2,11 @@
 Web 交互界面服务 (FastAPI) — interface.webui
 =============================================
 - 静态单页托管 (`/`) + REST API (`/api/*`) + SSE 事件流
-- Agent 任务: 复用 planner 适配层执行 (串行队列), SSE 推送执行事件
+- Agent 任务: 复用 planner 适配层执行 (默认串行队列, --workers N 并行), SSE 推送执行事件
 - Chat 模式: 直连 modelservice 流式对话 (chat 配置模型, 见 models.json profile 字段)
 - 模型服务查询由服务端代理 (modelservice 无 CORS, 避免跨端口直连)
 
-运行: python -m interface.webui [--port 8100] [--mock]
+运行: python -m interface.webui [--port 8100] [--mock] [--workers N]
 """
 from __future__ import annotations
 
@@ -90,11 +90,11 @@ def _model_profiles() -> dict[str, str]:
         return {}
 
 
-def create_app(mock: bool = False) -> FastAPI:
+def create_app(mock: bool = False, workers: int = 1) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.manager = TaskManager(asyncio.get_running_loop(), mock=mock)
-        logger.info("界面服务已启动 (mock=%s)", mock)
+        app.state.manager = TaskManager(asyncio.get_running_loop(), mock=mock, workers=workers)
+        logger.info("界面服务已启动 (mock=%s, workers=%d)", mock, workers)
         try:
             yield
         finally:
@@ -297,12 +297,13 @@ def create_app(mock: bool = False) -> FastAPI:
             "status": "ok",
             "modelservice": {"online": online, "loaded": loaded},
             "queue_len": mgr().queue_len(),
-            "running": mgr().running_id(),
+            "running": mgr().running_ids(),
+            "workers": workers,
             "mock": mock,
         }
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "queue_len": mgr().queue_len(), "running": mgr().running_id()}
+        return {"status": "ok", "queue_len": mgr().queue_len(), "running": mgr().running_ids()}
 
     return app

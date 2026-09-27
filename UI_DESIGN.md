@@ -1,6 +1,6 @@
 # 智能体交互界面设计（Web · Agent 任务 + Chat 对话）
 
-> 状态：**已实现**（2026-09；双模式 + 框架逐步流式 + 任务历史落盘 + 操作审批卡片；验收脚本 `interface/webui/test_e2e.py`、`planner/adapters/test_runner_stream.py`、`interface/webui/test_tasks_persist.py` 与 `interface/webui/test_approval.py`，浏览器端到端复验通过）
+> 状态：**已实现**（2026-09；双模式 + 框架逐步流式 + 任务历史落盘 + 操作审批卡片 + 多任务并行开关；验收脚本 `interface/webui/test_e2e.py`、`planner/adapters/test_runner_stream.py`、`interface/webui/test_tasks_persist.py`、`interface/webui/test_approval.py` 与 `interface/webui/test_workers.py`，浏览器端到端复验通过）
 > 代码位置：`interface/webui/`（用户交互层）；后续规划见 `ROADMAP.md`
 > 关联：`framework.md`（总体架构）、`PRINCIPLES.md`（开发原则）、`INTEGRATION.md`（多框架集成）
 
@@ -30,7 +30,7 @@
 
 ### 1.2 关键约束
 
-1. **单 GPU 串行**：模型服务同时仅一个模型占 VRAM → Agent 任务队列串行执行；Chat 请求与任务共享模型服务（服务端有推理锁）。
+1. **单 GPU 串行**：模型服务同时仅一个模型占 VRAM → Agent 任务默认串行（`--workers N` 可显式开启并行；模型推理仍由服务端锁串行，任务交替等待模型）；Chat 请求与任务共享模型服务（服务端有推理锁）。
 2. **框架运行位置差异**：`langgraph / pydantic-ai / smolagents / llamaindex / mcp` 进程内；`crewai / autogen` 隔离 venv 子进程。
 3. **事件能力差异**：LangGraph 逐节点流式（`steps`）；`crewai / autogen / mcp / smolagents` 逐行或逐步骤 `log`（`logs`）；`pydantic-ai / llamaindex` 为 basic（仅开始/结束，SDK 无稳定步骤钩子）。
 4. **modelservice 无 CORS**：浏览器不直连，由界面服务服务端代理。
@@ -48,7 +48,7 @@
      │ POST /api/chat/stream (fetch) │ SSE 流式响应                  (Chat)
 ┌────▼───────────────────────────────┴──────────────────┐
 │  interface.webui  (FastAPI, 127.0.0.1:8100)           │
-│  ├─ TaskManager: 单工作线程队列 + 事件总线              │
+│  ├─ TaskManager: 工作线程队列 (--workers N) + 事件总线  │
 │  ├─ Chat 代理: 转发 modelservice /v1/chat/completions  │
 │  └─ 静态页托管 + 模型服务查询代理                       │
 └────┬──────────────────────────────────────────────────┘
@@ -72,7 +72,8 @@ cd D:\agent\modelservice
 
 # 终端 2：界面服务
 cd D:\agent
-myagent\Scripts\python.exe -m interface.webui              # 默认 127.0.0.1:8100
+myagent\Scripts\python.exe -m interface.webui              # 默认 127.0.0.1:8100 (任务串行)
+myagent\Scripts\python.exe -m interface.webui --workers 2  # 任务并行 (2 个工作线程)
 myagent\Scripts\python.exe -m interface.webui --open       # 启动后自动打开浏览器
 myagent\Scripts\python.exe -m interface.webui --mock       # Agent 任务离线演示
 ```
@@ -252,10 +253,11 @@ interface/webui/
 ├── test_e2e.py      # 冒烟验收脚本 (离线自动降级)
 ├── test_tasks_persist.py  # 任务历史落盘冒烟 (离线)
 ├── test_approval.py # 操作审批冒烟 (注册表 / 图链路 / TaskManager, 离线)
+├── test_workers.py  # 多 worker 并行冒烟 (并发 / 取消隔离 / 位次, 离线)
 └── static/          # index.html / style.css / app.js (原生, 无 CDN)
 ```
 
-- **TaskManager**：`queue.Queue` + 1 个 daemon 工作线程；任务历史最近 50 条，终态任务原子落盘 `memory/ui_tasks.json`（启动恢复；mock 单独 `ui_tasks.mock.json`）；`--mock` 用 `ScriptedLLM` 离线演示；审批请求阻塞等待（`APPROVAL_TIMEOUT=120s` 超时自动拒绝，任务取消优先）。
+- **TaskManager**：`queue.Queue` + N 个 daemon 工作线程（默认 1，`--workers N` 开启并行；事件写入持任务级锁）；任务历史最近 50 条，终态任务原子落盘 `memory/ui_tasks.json`（启动恢复；mock 单独 `ui_tasks.mock.json`）；`--mock` 用 `ScriptedLLM` 离线演示；审批请求阻塞等待（`APPROVAL_TIMEOUT=120s` 超时自动拒绝，任务取消优先）。
 - **chat.py**：httpx 流式转发 `/v1/chat/completions`，读超时 600s（覆盖模型懒加载）；上游异常转 `error` 事件，不抛出。
 
 ---
@@ -302,6 +304,16 @@ interface/webui/
 | `interface/webui/static/{app.js,style.css}` | 审批卡片（🛡️ 批准 / 拒绝 / 超时）渲染与交互 | 纯新增 |
 | `interface/webui/test_approval.py` | 新增离线冒烟（注册表 / 图链路 / TaskManager，22 项） | 独立运行，不影响其他入口 |
 
+（2026-09 P2 多任务并行开关：追加改动）
+
+| 文件 | 改动 | 兼容性 |
+| :--- | :--- | :--- |
+| `interface/webui/tasks.py` | `workers` 参数（默认 1）；运行集合 `_running` + 事件锁 `emit_lock`；`running_id()` → `running_ids()` | `TaskManager(loop, mock)` 调用不变 |
+| `interface/webui/app.py` | `create_app(..., workers=1)`；health 返回 `running` 列表 + `workers` | 默认 1；`running` 字段由 str 变 list |
+| `interface/webui/__main__.py` | `--workers N` 参数 | 默认 1 ⇒ 旧命令行为不变 |
+| `interface/webui/static/app.js` | 环境栏“排队中 N · 运行中 M” | 兼容旧响应（字符串 running） |
+| `interface/webui/test_workers.py` | 新增离线冒烟（并发 / 事件完整 / 取消隔离 / 位次 / 停机，23 项） | 独立运行，不影响其他入口 |
+
 ---
 
 ## 10. 验收与已知限制
@@ -313,6 +325,7 @@ myagent\Scripts\python.exe -m interface.webui --mock --port 8100
 myagent\Scripts\python.exe -m interface.webui.test_e2e
 myagent\Scripts\python.exe -m interface.webui.test_tasks_persist   # 离线, 无需起服务
 myagent\Scripts\python.exe -m interface.webui.test_approval        # 离线, 无需起服务
+myagent\Scripts\python.exe -m interface.webui.test_workers         # 离线, 无需起服务
 ```
 
 - 离线（mock）：端点 / 事件序列 `queued→started→thought→tool→tool_result→result→close` / 取消 / 续传兜底 / 边界；
@@ -324,6 +337,6 @@ myagent\Scripts\python.exe -m interface.webui.test_approval        # 离线, 无
 1. `pydantic-ai / llamaindex` 仅 basic 展示（其 SDK 无稳定步骤钩子；`crewai / autogen / mcp / smolagents` 已支持 `logs`）。
 2. 取消为协作式：`crewai / autogen` 子进程即时终止（实测 ≤0.5s）；`mcp / smolagents` 在循环 / 步骤边界生效；`pydantic-ai / llamaindex` 无执行中打断点（结束后置为 cancelled）。
 3. 任务历史落盘（重启不丢，仅最近 50 条终态任务；运行中任务不恢复）；Chat 对话无服务端状态——重启 / 清空即丢（P2 增强）。
-4. Agent 任务单并发（单卡 VRAM 约束，非缺陷）。
-5. 审批等待阻塞工作线程（单线程串行）：等待期间其他任务排队，最长 120s 超时自动拒绝。
+4. Agent 任务默认单并发（单卡 VRAM 约束）；`--workers N` 可开启并行，但模型推理仍由 modelservice 锁串行（任务交替等待模型）。
+5. 审批等待阻塞其工作线程：默认单 worker 时等待期间其他任务排队，最长 120s 超时自动拒绝。
 6. Chat 暂无 Markdown 渲染与续传（P2 增强，见 `ROADMAP.md`）。

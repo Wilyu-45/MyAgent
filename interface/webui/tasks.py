@@ -1,7 +1,8 @@
 """
-界面层任务管理: 串行队列 + 事件缓冲 + 协作式取消。
+界面层任务管理: 任务队列 + 事件缓冲 + 协作式取消。
 ====================================================
-- 单工作线程串行执行任务 (与单卡 VRAM 约束一致, 多任务排队)
+- 默认单工作线程串行执行 (与单卡 VRAM 约束一致); --workers N 开启并行
+- 事件写入持任务级锁: 多 worker 并发刷新位次时保证 seq 单调与推送顺序
 - 事件统一信封 {seq, ts, task_id, type, ...载荷}; 任务内缓冲供 SSE 断线续传
 - 取消: cancel_flag 置位后, 下一个事件点抛 TaskCancelled 从执行循环退出;
   排队中的任务直接出队置为 cancelled
@@ -57,6 +58,7 @@ class Task:
     events: list = field(default_factory=list)
     result: Optional[dict] = None
     cancel_flag: threading.Event = field(default_factory=threading.Event)
+    emit_lock: threading.Lock = field(default_factory=threading.Lock)   # 事件写入互斥 (多 worker)
     subscribers: set = field(default_factory=set)   # asyncio.Queue 集合
     seq: int = 0
     stream_closed: bool = False
@@ -80,7 +82,7 @@ class TaskManager:
     """任务队列 + 事件总线。submit/snapshot/cancel 供 HTTP 层调用。"""
 
     def __init__(self, loop: asyncio.AbstractEventLoop, mock: bool = False,
-                 history_path: str | Path | None = None):
+                 history_path: str | Path | None = None, workers: int = 1):
         self._loop = loop
         self._mock = mock
         self._history_path = (Path(history_path) if history_path is not None
@@ -89,10 +91,14 @@ class TaskManager:
         self._tasks: dict[str, Task] = {}
         self._order: list[str] = []            # 提交顺序
         self._queue: "queue.Queue[Optional[Task]]" = queue.Queue()
-        self._current: Optional[Task] = None
+        self._running: dict[str, Task] = {}    # 运行中任务 (多 worker 时可能多个)
         self._load_history()
-        self._worker = threading.Thread(target=self._run_worker, name="webui-worker", daemon=True)
-        self._worker.start()
+        self._workers = [
+            threading.Thread(target=self._run_worker, name=f"webui-worker-{i}", daemon=True)
+            for i in range(max(1, int(workers)))
+        ]
+        for w in self._workers:
+            w.start()
 
     # ==================== 对外 API ====================
 
@@ -216,11 +222,13 @@ class TaskManager:
     def queue_len(self) -> int:
         return sum(1 for t in self._tasks.values() if t.status == "queued")
 
-    def running_id(self) -> Optional[str]:
-        return self._current.task_id if self._current is not None else None
+    def running_ids(self) -> list[str]:
+        """运行中任务 id 列表 (默认单 worker 至多 1 个; --workers N 时可能多个)。"""
+        return list(self._running)
 
     def stop(self) -> None:
-        self._queue.put(None)
+        for _ in self._workers:      # 每个 worker 一个哨兵
+            self._queue.put(None)
 
     # ==================== 内部: 任务历史落盘 ====================
 
@@ -291,14 +299,17 @@ class TaskManager:
         """补 seq/ts 信封 → 入缓冲 → 推送订阅者。取消标志生效时抛 TaskCancelled。"""
         if ev_type not in TERMINAL_TYPES and task.cancel_flag.is_set():
             raise TaskCancelled()
-        task.seq += 1
-        event = {"seq": task.seq, "ts": time.time(), "task_id": task.task_id,
-                 "type": ev_type, **payload}
-        task.events.append(event)
-        if len(task.events) > MAX_EVENTS:
-            del task.events[: len(task.events) - MAX_EVENTS]
-        for q in list(task.subscribers):
-            self._loop.call_soon_threadsafe(q.put_nowait, event)
+        with task.emit_lock:   # 多线程并发: 保证 seq 单调、缓冲与推送顺序一致
+            if ev_type not in TERMINAL_TYPES and task.cancel_flag.is_set():
+                raise TaskCancelled()   # 等锁期间可能已被取消
+            task.seq += 1
+            event = {"seq": task.seq, "ts": time.time(), "task_id": task.task_id,
+                     "type": ev_type, **payload}
+            task.events.append(event)
+            if len(task.events) > MAX_EVENTS:
+                del task.events[: len(task.events) - MAX_EVENTS]
+            for q in list(task.subscribers):
+                self._loop.call_soon_threadsafe(q.put_nowait, event)
         return event
 
     def _finalize_cancelled(self, task: Task) -> None:
@@ -351,7 +362,7 @@ class TaskManager:
                 return
             if task.cancel_flag.is_set() or task.status != "queued":
                 continue  # 排队期间已被取消
-            self._current = task
+            self._running[task.task_id] = task
             task.status = "running"
             task.started_at = time.time()
             try:
@@ -380,7 +391,7 @@ class TaskManager:
                 self._emit(task, "error", message=f"{e!r}")
             finally:
                 self._close_stream(task)
-                self._current = None
+                self._running.pop(task.task_id, None)
                 self._refresh_queue_positions()
 
     def _execute(self, task: Task) -> dict:

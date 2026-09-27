@@ -8,10 +8,10 @@
 - **非 langgraph 框架逐活动流式**（2026-09）：`crewai / autogen` 子进程 stdout 逐行流式（`log` 事件）+ 即时终止（`cancel_event` 0.5s 轮询 / `on_event` 异常 → `kill()`，实测 ≤0.5s）；`mcp / smolagents` 进程内逐步骤 `log`；`/api/frameworks` 增加 `streaming` 分级（steps/logs/basic）。验收：`planner/adapters/test_runner_stream.py`（20 项）+ `interface/webui/test_e2e.py`（29 项）。
 - **任务历史落盘**（2026-09）：终态任务原子落盘 `memory/ui_tasks.json`（mock 单独 `ui_tasks.mock.json`，避免演示数据混入），启动恢复；列表 / 快照 / SSE 回看重启后可用（仅最近 50 条，运行中任务不恢复）。验收：`interface/webui/test_tasks_persist.py`（21 项）+ 服务级重启恢复实跑。
 - **操作审批卡片**（2026-09）：高风险操作（`run_shell`）执行前在界面弹卡片确认（工具 / 命令 / 危险级别），批准 / 拒绝 / 120s 超时自动拒绝；拒绝时不执行并将拒绝文本回填模型收尾；任务取消优先于审批结果。统一 `approval` 回调三链路接入：进程内框架（langgraph / pydantic-ai / smolagents / llamaindex）经工具注册表拦截、`mcp` 主循环拦截、`crewai / autogen` 子进程 stdout `__APPROVAL__` 哨兵 + stdin 回复（`AGENT_APPROVAL=1` 开启；CLI 直跑默认放行）。验收：`interface/webui/test_approval.py`（22 项）+ `planner/adapters/test_runner_stream.py`（26 项）+ `interface/webui/test_e2e.py`（32 项）+ 服务级实跑（批准 / 拒绝）。
+- **多任务并行开关**（2026-09）：`--workers N` 开启任务并行（默认 1，遵守单卡 VRAM 约束）；TaskManager 线程数参数化，运行集合 + 事件任务级锁（seq 单调、推送有序）；`/api/health` 返回 `running` 列表与 `workers`。验收：`interface/webui/test_workers.py`（23 项）+ 服务级实跑（--workers 2 并发 / 取消隔离）。
 
 ## P2（近期：界面设计内的补齐）
 
-- **多任务并行开关**：`--workers N`（默认仍为 1，遵守单卡约束）。
 - **Chat 增强**：Markdown 渲染、回答重试/编辑重发。
 
 ## P3（中期）

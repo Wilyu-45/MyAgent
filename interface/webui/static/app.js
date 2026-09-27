@@ -196,7 +196,9 @@ async function refreshHealth() {
     env.appendChild(el("div", "muted", "模式: " + (h.mock ? "离线演示 (mock)" : "在线")));
     env.appendChild(el("div", "muted",
       "已加载模型: " + ((h.modelservice && h.modelservice.loaded || []).join(", ") || "无")));
-    env.appendChild(el("div", "muted", "排队中: " + (h.queue_len || 0)));
+    const running = Array.isArray(h.running) ? h.running.length : (h.running ? 1 : 0);
+    env.appendChild(el("div", "muted",
+      "排队中: " + (h.queue_len || 0) + " · 运行中: " + running));
   } catch {
     msOnline = false;
     $("ms-dot").className = "dot off";
