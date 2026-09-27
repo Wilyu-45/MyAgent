@@ -5,21 +5,31 @@
 - 事件统一信封 {seq, ts, task_id, type, ...载荷}; 任务内缓冲供 SSE 断线续传
 - 取消: cancel_flag 置位后, 下一个事件点抛 TaskCancelled 从执行循环退出;
   排队中的任务直接出队置为 cancelled
+- 任务历史: 终态任务落盘 memory/ui_tasks.json (启动时恢复, 重启不丢;
+  mock 模式单独落盘 ui_tasks.mock.json, 避免演示数据混入正式历史)
 """
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import queue
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from planner.adapters import run_framework
 
 MAX_EVENTS = 2000      # 单任务事件缓冲上限 (超出裁剪最旧的)
 MAX_HISTORY = 50       # 内存保留的最近任务数
+
+HISTORY_FILE = Path(__file__).resolve().parents[2] / "memory" / "ui_tasks.json"
+MOCK_HISTORY_FILE = HISTORY_FILE.with_name("ui_tasks.mock.json")
+
+logger = logging.getLogger("interface.webui.tasks")
 
 # 终态类事件: 不受取消标志影响 (保证收尾一定能发出)
 TERMINAL_TYPES = {"result", "error", "cancelled", "close"}
@@ -62,13 +72,18 @@ class Task:
 class TaskManager:
     """任务队列 + 事件总线。submit/snapshot/cancel 供 HTTP 层调用。"""
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, mock: bool = False):
+    def __init__(self, loop: asyncio.AbstractEventLoop, mock: bool = False,
+                 history_path: str | Path | None = None):
         self._loop = loop
         self._mock = mock
+        self._history_path = (Path(history_path) if history_path is not None
+                              else (MOCK_HISTORY_FILE if mock else HISTORY_FILE))
+        self._hist_lock = threading.Lock()
         self._tasks: dict[str, Task] = {}
         self._order: list[str] = []            # 提交顺序
         self._queue: "queue.Queue[Optional[Task]]" = queue.Queue()
         self._current: Optional[Task] = None
+        self._load_history()
         self._worker = threading.Thread(target=self._run_worker, name="webui-worker", daemon=True)
         self._worker.start()
 
@@ -93,19 +108,7 @@ class TaskManager:
         t = self._tasks.get(task_id)
         if t is None:
             return None
-        return {
-            "task_id": t.task_id,
-            "goal": t.goal,
-            "framework": t.framework,
-            "model": t.model,
-            "max_steps": t.max_steps,
-            "status": t.status,
-            "created_at": t.created_at,
-            "started_at": t.started_at,
-            "finished_at": t.finished_at,
-            "events": list(t.events),
-            "result": t.result,
-        }
+        return self._record(t)
 
     def recent(self, n: int = 50) -> list[dict]:
         out = []
@@ -161,6 +164,69 @@ class TaskManager:
     def stop(self) -> None:
         self._queue.put(None)
 
+    # ==================== 内部: 任务历史落盘 ====================
+
+    @staticmethod
+    def _record(t: Task) -> dict:
+        """任务的完整记录 (snapshot 与落盘共用同一字段集)。"""
+        return {
+            "task_id": t.task_id,
+            "goal": t.goal,
+            "framework": t.framework,
+            "model": t.model,
+            "max_steps": t.max_steps,
+            "status": t.status,
+            "created_at": t.created_at,
+            "started_at": t.started_at,
+            "finished_at": t.finished_at,
+            "events": list(t.events),
+            "result": t.result,
+        }
+
+    def _load_history(self) -> None:
+        """启动恢复: 仅载入终态任务 (运行中/排队的任务随旧进程消亡, 不恢复)。"""
+        try:
+            if not self._history_path.is_file():
+                return
+            data = json.loads(self._history_path.read_text(encoding="utf-8"))
+            entries = data.get("tasks", []) if isinstance(data, dict) else []
+            for e in entries:
+                tid = e.get("task_id") if isinstance(e, dict) else None
+                if not isinstance(tid, str) or not tid or tid in self._tasks:
+                    continue
+                if e.get("status") not in TERMINAL_STATUS:
+                    continue
+                task = Task(
+                    task_id=tid, goal=str(e.get("goal", "")),
+                    framework=str(e.get("framework", "langgraph")),
+                    model=e.get("model"), max_steps=e.get("max_steps"),
+                    status=e["status"], created_at=e.get("created_at") or time.time(),
+                    started_at=e.get("started_at"), finished_at=e.get("finished_at"),
+                    events=[ev for ev in e.get("events", []) if isinstance(ev, dict)],
+                    result=e.get("result"), stream_closed=True,
+                )
+                task.seq = max((int(ev.get("seq", 0)) for ev in task.events), default=0)
+                self._tasks[tid] = task
+                self._order.append(tid)
+            if self._order:
+                logger.info("任务历史已恢复: %d 条 (%s)", len(self._order), self._history_path)
+        except Exception as exc:  # noqa: BLE001 — 历史损坏不阻断启动
+            logger.warning("任务历史读取失败 (%s): %r", self._history_path, exc)
+
+    def _save_history(self) -> None:
+        """落盘: 仅终态任务; 原子写 (临时文件 + 替换), 失败不阻断。"""
+        try:
+            with self._hist_lock:
+                records = [self._record(self._tasks[tid]) for tid in self._order
+                           if tid in self._tasks and self._tasks[tid].status in TERMINAL_STATUS]
+                payload = {"version": 1, "saved_at": time.time(), "tasks": records}
+                self._history_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self._history_path.with_name(self._history_path.name + ".tmp")
+                tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                tmp.replace(self._history_path)
+        except Exception as exc:  # noqa: BLE001 — 落盘失败不影响任务执行
+            logger.warning("任务历史落盘失败 (%s): %r", self._history_path, exc)
+
     # ==================== 内部: 事件 ====================
 
     def _emit(self, task: Task, ev_type: str, **payload) -> dict:
@@ -183,9 +249,10 @@ class TaskManager:
         self._emit(task, "cancelled")
 
     def _close_stream(self, task: Task) -> None:
-        """收尾: 先发 close 再置 closed, 保证订阅时序 (见 subscribe 注释)。"""
+        """收尾: 先发 close 再置 closed, 保证订阅时序 (见 subscribe 注释); 随后落盘终态历史。"""
         self._emit(task, "close")
         task.stream_closed = True
+        self._save_history()
 
     def _queue_position(self, task: Task) -> int:
         return sum(

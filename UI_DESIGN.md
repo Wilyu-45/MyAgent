@@ -1,6 +1,6 @@
 # 智能体交互界面设计（Web · Agent 任务 + Chat 对话）
 
-> 状态：**已实现**（2026-09；双模式 + 框架逐步流式；验收脚本 `interface/webui/test_e2e.py` 与 `planner/adapters/test_runner_stream.py`，浏览器端到端复验通过）
+> 状态：**已实现**（2026-09；双模式 + 框架逐步流式 + 任务历史落盘；验收脚本 `interface/webui/test_e2e.py`、`planner/adapters/test_runner_stream.py` 与 `interface/webui/test_tasks_persist.py`，浏览器端到端复验通过）
 > 代码位置：`interface/webui/`（用户交互层）；后续规划见 `ROADMAP.md`
 > 关联：`framework.md`（总体架构）、`PRINCIPLES.md`（开发原则）、`INTEGRATION.md`（多框架集成）
 
@@ -121,7 +121,7 @@ myagent\Scripts\python.exe -m interface.webui --mock       # Agent 任务离线�
 - 出错时助手气泡标红并 toast；模型服务离线时禁止发送。
 
 ### 4.4 侧栏与输入区
-- 侧栏：任务历史（内存最近 50 条，点击回看）/ 可用工具 / 环境；<900px 折叠为抽屉。
+- 侧栏：任务历史（最近 50 条，落盘 `memory/ui_tasks.json`，点击回看）/ 可用工具 / 环境；<900px 折叠为抽屉。
 - 输入区：Enter 发送 / Shift+Enter 换行；Agent 运行中显示「取消」。
 
 ---
@@ -231,13 +231,14 @@ interface/webui/
 ├── __init__.py      # 导出 create_app()
 ├── __main__.py      # CLI: python -m interface.webui [--host][--port][--mock][--open]
 ├── app.py           # FastAPI 路由 + SSE 生成器 + 静态托管 + 模型/对话代理
-├── tasks.py         # TaskManager: 串行队列 / 任务快照 / 事件缓冲 / 协作取消
+├── tasks.py         # TaskManager: 串行队列 / 任务快照 / 事件缓冲 / 协作取消 / 历史落盘
 ├── chat.py          # Chat 流式代理 (modelservice → delta/done/error)
 ├── test_e2e.py      # 冒烟验收脚本 (离线自动降级)
+├── test_tasks_persist.py  # 任务历史落盘冒烟 (离线)
 └── static/          # index.html / style.css / app.js (原生, 无 CDN)
 ```
 
-- **TaskManager**：`queue.Queue` + 1 个 daemon 工作线程；任务历史最近 50 条（内存态）；`--mock` 用 `ScriptedLLM` 离线演示。
+- **TaskManager**：`queue.Queue` + 1 个 daemon 工作线程；任务历史最近 50 条，终态任务原子落盘 `memory/ui_tasks.json`（启动恢复；mock 单独 `ui_tasks.mock.json`）；`--mock` 用 `ScriptedLLM` 离线演示。
 - **chat.py**：httpx 流式转发 `/v1/chat/completions`，读超时 600s（覆盖模型懒加载）；上游异常转 `error` 事件，不抛出。
 
 ---
@@ -265,6 +266,14 @@ interface/webui/
 | `interface/webui/app.py` | `/api/frameworks` 增加 `streaming` 分级 | 向后兼容（新字段值） |
 | `planner/adapters/test_runner_stream.py` | 新增离线冒烟（协议 / 取消 / 超时，20 项） | 独立运行，不影响其他入口 |
 
+（2026-09 P2 任务历史落盘：追加改动）
+
+| 文件 | 改动 | 兼容性 |
+| :--- | :--- | :--- |
+| `interface/webui/tasks.py` | 终态任务原子落盘 `memory/ui_tasks.json`（启动恢复；mock 为 `ui_tasks.mock.json`）；新增可选参数 `history_path` | 默认落盘；`TaskManager(loop, mock)` 调用不变 |
+| `interface/webui/test_tasks_persist.py` | 新增离线冒烟（落盘 / 恢复 / 取消 / 容错 / 裁剪，21 项） | 独立运行，不影响其他入口 |
+| `.gitignore` | 忽略 `memory/*.json` 运行时数据 | — |
+
 ---
 
 ## 10. 验收与已知限制
@@ -274,6 +283,7 @@ interface/webui/
 ```powershell
 myagent\Scripts\python.exe -m interface.webui --mock --port 8100
 myagent\Scripts\python.exe -m interface.webui.test_e2e
+myagent\Scripts\python.exe -m interface.webui.test_tasks_persist   # 离线, 无需起服务
 ```
 
 - 离线（mock）：端点 / 事件序列 `queued→started→thought→tool→tool_result→result→close` / 取消 / 续传兜底 / 边界；
@@ -284,6 +294,6 @@ myagent\Scripts\python.exe -m interface.webui.test_e2e
 
 1. `pydantic-ai / llamaindex` 仅 basic 展示（其 SDK 无稳定步骤钩子；`crewai / autogen / mcp / smolagents` 已支持 `logs`）。
 2. 取消为协作式：`crewai / autogen` 子进程即时终止（实测 ≤0.5s）；`mcp / smolagents` 在循环 / 步骤边界生效；`pydantic-ai / llamaindex` 无执行中打断点（结束后置为 cancelled）。
-3. 任务历史为内存态；Chat 对话无服务端状态——重启 / 清空即丢（P2 落盘）。
+3. 任务历史落盘（重启不丢，仅最近 50 条终态任务；运行中任务不恢复）；Chat 对话无服务端状态——重启 / 清空即丢（P2 增强）。
 4. Agent 任务单并发（单卡 VRAM 约束，非缺陷）。
 5. Chat 暂无 Markdown 渲染与续传（P2 增强，见 `ROADMAP.md`）。

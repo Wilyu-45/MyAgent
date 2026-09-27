@@ -38,7 +38,7 @@
 
 ## 6. 测试与验收
 
-- 能离线验证的必须离线可验证（如 `--mock`）；冒烟脚本随模块放置（`interface/webui/test_e2e.py`、`modelservice/test_e2e.py`、`planner/adapters/test_runner_stream.py`）。
+- 能离线验证的必须离线可验证（如 `--mock`）；冒烟脚本随模块放置（`interface/webui/test_e2e.py`、`interface/webui/test_tasks_persist.py`、`modelservice/test_e2e.py`、`planner/adapters/test_runner_stream.py`）。
 - 验收不留临时产物（截图、临时脚本等用后即删）。
 
 ## 7. 关键决策记录
