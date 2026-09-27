@@ -31,6 +31,9 @@ from .base import PROJECT_ROOT, make_result
 
 FRAMEWORK = "mcp"
 
+# 需人工审批的高风险工具 (按名字拦截, 不侵入 MCP 服务器实现)
+APPROVAL_TOOLS = {"run_shell"}
+
 DEFAULT_SERVER = {
     "name": "local",
     "command": sys.executable,
@@ -113,12 +116,14 @@ class _McpClient:
 class _McpAgent:
     def __init__(self, model: Optional[str], max_steps: int,
                  on_event: Optional[Callable[[dict], None]] = None,
-                 cancel_event: Optional[threading.Event] = None):
+                 cancel_event: Optional[threading.Event] = None,
+                 approval: Optional[Callable[[dict], bool]] = None):
         self._clients = [_McpClient(c) for c in _load_server_configs()]
         self._model = model or settings.LLM_MODEL
         self._max_steps = max_steps or settings.MAX_STEPS
         self._on_event = on_event
         self._cancel_event = cancel_event
+        self._approval = approval
         self._llm = OpenAI(
             base_url=settings.LLM_BASE_URL, api_key=settings.LLM_API_KEY, timeout=600
         )
@@ -183,7 +188,15 @@ class _McpAgent:
             if action:
                 args = obj.get("action_input") or {}
                 self._log(f"调用工具 {action}({json.dumps(args, ensure_ascii=False)[:200]})")
-                result = await self._call_discovered(discovered, action, args)
+                denied = False
+                if action in APPROVAL_TOOLS and self._approval is not None:
+                    req = {"tool": action, "detail": str(args.get("command", "")),
+                           "danger_level": "risky"}
+                    denied = not self._approval(req)
+                if denied:
+                    result = "(用户拒绝执行该命令: 界面审批未通过; 请调整方案或直接总结)"
+                else:
+                    result = await self._call_discovered(discovered, action, args)
                 first_line = result.strip().splitlines()[0] if result.strip() else ""
                 self._log(f"工具返回: {first_line[:200]}")
                 trace.append({"type": "tool", "name": action, "content": result[:300]})
@@ -218,9 +231,11 @@ def run(
     verbose: bool = False,
     on_event: Optional[Callable[[dict], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    approval: Optional[Callable[[dict], bool]] = None,
     **kwargs,
 ) -> dict:
-    agent = _McpAgent(model, max_steps, on_event=on_event, cancel_event=cancel_event)
+    agent = _McpAgent(model, max_steps, on_event=on_event, cancel_event=cancel_event,
+                      approval=approval)
     try:
         result = asyncio.run(agent.run(goal))
     except Exception as e:

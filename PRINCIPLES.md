@@ -38,7 +38,7 @@
 
 ## 6. 测试与验收
 
-- 能离线验证的必须离线可验证（如 `--mock`）；冒烟脚本随模块放置（`interface/webui/test_e2e.py`、`interface/webui/test_tasks_persist.py`、`modelservice/test_e2e.py`、`planner/adapters/test_runner_stream.py`）。
+- 能离线验证的必须离线可验证（如 `--mock`）；冒烟脚本随模块放置（`interface/webui/test_e2e.py`、`interface/webui/test_tasks_persist.py`、`interface/webui/test_approval.py`、`modelservice/test_e2e.py`、`planner/adapters/test_runner_stream.py`）。
 - 验收不留临时产物（截图、临时脚本等用后即删）。
 
 ## 7. 关键决策记录
@@ -49,6 +49,7 @@
 - Chat 对话**无服务端状态**：历史保存在前端内存，不落库。
 - 模型用显式 `profile` 字段区分 agent/chat 配置，界面按当前模式过滤模型。
 - 子进程框架（crewai/autogen）进度流式：runner stdout 行 → `log` 事件，结果行用 `__RESULT__` 哨兵；取消走 `cancel_event`（杀子进程）与 `on_event` 抛异常双路径。结果行解析必须在**未截断**的去噪原始行上进行（容忍行首粘连/超长/尾部噪声），截断只用于日志转发——先截断再解析曾导致长结果行解析失败。
+- 高风险操作审批：统一可选回调 `approval(req) -> bool`（`req = {tool, detail, danger_level}`，`None` = 旧行为）；进程内框架与 `mcp` 在调用点拦截；子进程框架复用 stdout 哨兵模式（`__APPROVAL__{json}` 请求 + stdin `{"approved": bool}` 回复，`AGENT_APPROVAL=1` 开启），CLI 直跑默认放行、EOF / 异常 fail-safe 拒绝。
 
 ## 8. AI 协作约定
 

@@ -1,7 +1,7 @@
 """
 base.run_in_venv 流式执行冒烟测试 (离线, 不依赖模型服务与隔离 venv)
 ==================================================================
-用假 runner 脚本 + monkeypatch 覆盖 7 组场景:
+用假 runner 脚本 + monkeypatch 覆盖 8 组场景:
   1) 缺 venv            -> error 结果
   2) 哨兵结果行         -> 进度行转发 (ANSI/CR 清理、空行跳过、超长截断、结果行不转日志)
   3) 旧协议结果行       -> 末尾纯 JSON 兼容
@@ -9,6 +9,7 @@ base.run_in_venv 流式执行冒烟测试 (离线, 不依赖模型服务与隔�
   5) cancel_event 置位  -> 密集输出下即时终止, status="cancelled"
   6) on_event 抛异常    -> 异常透传且子进程被杀
   7) 超时               -> error (密集输出下同样生效)
+  8) 审批协议           -> 批准/拒绝经 stdin 回写; 审批行不转日志; 回调异常透传
 
 运行: myagent\\Scripts\\python.exe -m planner.adapters.test_runner_stream
 说明: 进程内框架 (mcp/smolagents) 的 log 事件与取消除外, 单独在界面层实跑验证。
@@ -72,6 +73,16 @@ elif mode == "slow":
 elif mode == "crash":
     print("即将崩溃", flush=True)
     sys.exit(3)
+elif mode == "approval":
+    print("进度行 A", flush=True)
+    print("__APPROVAL__" + json.dumps({"tool": "shell", "detail": "echo hi", "danger_level": "risky"}), flush=True)
+    line = sys.stdin.readline()
+    try:
+        approved = bool(json.loads(line).get("approved"))
+    except Exception:
+        approved = "ERR"
+    print(f"收到回复: {approved}", flush=True)
+    print("__RESULT__" + json.dumps({"status": "finished", "final_answer": f"approved={approved}", "steps": 1}), flush=True)
 '''
 
 
@@ -193,6 +204,39 @@ def main() -> None:
             check("超时后子进程已终止", bool(procs7) and _wait_exit(procs7[-1]))
         finally:
             base.RUN_TIMEOUT = old_timeout
+
+        # 8) 审批协议: 批准 / 拒绝 / 回调异常
+        reqs: list[dict] = []
+
+        def approve_all(req: dict) -> bool:
+            reqs.append(req)
+            return True
+
+        events8: list[dict] = []
+        r8, exc8, _ = _run_captured("fake", "goal-8", on_event=events8.append,
+                                    mode="approval", approval_fn=approve_all)
+        check("审批批准路径", exc8 is None and r8["status"] == "finished"
+              and r8["final_answer"] == "approved=True", repr(exc8 or r8))
+        check("审批请求内容透传", reqs == [{"tool": "shell", "detail": "echo hi",
+                                          "danger_level": "risky"}], str(reqs))
+        check("审批行不转日志", not any("__APPROVAL__" in e.get("line", "") for e in events8),
+              str([e.get("line", "") for e in events8]))
+
+        r9, exc9, _ = _run_captured("fake", "goal-9", mode="approval",
+                                    approval_fn=lambda req: False)
+        check("审批拒绝路径", exc9 is None and r9["status"] == "finished"
+              and r9["final_answer"] == "approved=False", repr(exc9 or r9))
+
+        def bad_approval(req: dict) -> bool:
+            raise RuntimeError("界面取消")
+
+        t0 = time.monotonic()
+        _r10, exc10, procs10 = _run_captured("fake", "goal-10", mode="approval",
+                                             approval_fn=bad_approval)
+        elapsed = time.monotonic() - t0
+        check("审批回调异常透传", isinstance(exc10, RuntimeError) and elapsed < 5,
+              f"elapsed={elapsed:.2f}s {exc10!r}")
+        check("审批异常后子进程已终止", bool(procs10) and _wait_exit(procs10[-1]))
 
     print(f"\n{PASSED} 通过, {FAILED} 失败")
     return 1 if FAILED else 0

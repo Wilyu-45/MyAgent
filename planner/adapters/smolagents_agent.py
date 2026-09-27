@@ -48,6 +48,7 @@ def run(
     verbose: bool = False,
     on_event: Optional[Callable[[dict], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    approval: Optional[Callable[[dict], bool]] = None,
     **kwargs,
 ) -> dict:
     llm = OpenAIServerModel(
@@ -60,14 +61,14 @@ def run(
         agent_kwargs["step_callbacks"] = [_build_step_callback(on_event)]
     try:
         agent = CodeAgent(
-            tools=[smol_tool(fn) for fn in build_typed_tools()],
+            tools=[smol_tool(fn) for fn in build_typed_tools(approval=approval)],
             model=llm,
             **agent_kwargs,
         )
     except TypeError:                     # 旧版 smolagents 无 step_callbacks 参数
         agent_kwargs.pop("step_callbacks", None)
         agent = CodeAgent(
-            tools=[smol_tool(fn) for fn in build_typed_tools()],
+            tools=[smol_tool(fn) for fn in build_typed_tools(approval=approval)],
             model=llm,
             **agent_kwargs,
         )

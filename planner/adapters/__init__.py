@@ -41,6 +41,7 @@ def run_framework(
     verbose: bool = False,
     on_event: Optional[Callable[[dict], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    approval: Optional[Callable[[dict], bool]] = None,
     **kwargs: Any,
 ) -> dict:
     """统一入口: 调用任意框架的 run(), 返回 {framework, goal, status, final_answer, steps, trace}。
@@ -50,7 +51,12 @@ def run_framework(
         mcp/smolagents 逐步骤 (log)。
     cancel_event: 可选取消信号 (threading.Event)。子进程框架 (crewai/
         autogen) 据此即时终止 runner; 其余框架经 on_event 抛异常协作取消。
+    approval: 可选人工审批回调 (界面层使用)。高风险操作 (shell 等) 执行前
+        以 {"tool", "detail", "danger_level"} 请求确认, 返回 True 放行 / False 拒绝;
+        默认 None 时行为不变 (直接放行)。进程内框架经 ToolRegistry 生效,
+        crewai/autogen 经子进程 __APPROVAL__ 协议, 对调用方接口一致。
     """
     mod = get_adapter(name)
     return mod.run(goal=goal, model=model, max_steps=max_steps, verbose=verbose,
-                   on_event=on_event, cancel_event=cancel_event, **kwargs)
+                   on_event=on_event, cancel_event=cancel_event,
+                   approval=approval, **kwargs)

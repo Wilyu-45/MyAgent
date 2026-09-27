@@ -42,10 +42,27 @@ _policy = SandboxPolicy([PROJECT_ROOT], allow_shell=True)
 
 # ---------- 进度输出 (base.run_in_venv 实时转为界面 log 事件) ----------
 RESULT_PREFIX = "__RESULT__"  # 与 planner/adapters/base.py 的 RESULT_PREFIX 保持一致
+APPROVAL_PREFIX = "__APPROVAL__"  # 高风险操作审批请求哨兵 (base 侧解析并经 stdin 回复)
 
 
 def _emit(line: str) -> None:
     print(f"[autogen] {line}", flush=True)
+
+
+def _approval(tool: str, detail: str) -> bool:
+    """请求界面层人工审批; 未开启通道 (AGENT_APPROVAL!=1) 时直接放行 (CLI 直跑兼容)。"""
+    if os.getenv("AGENT_APPROVAL") != "1":
+        return True
+    req = {"tool": tool, "detail": detail, "danger_level": "risky"}
+    print(APPROVAL_PREFIX + json.dumps(req, ensure_ascii=False), flush=True)
+    try:
+        line = sys.stdin.readline()
+    except Exception:
+        return False
+    try:
+        return bool(json.loads(line).get("approved"))
+    except Exception:
+        return False   # stdin 关闭/格式异常: 拒绝执行 (fail-safe)
 
 
 SYSTEM_PROMPT = """你是一个运行在 Windows 上的电脑自动化助手。你的任务目标: {goal}
@@ -92,7 +109,10 @@ def _call_tool(name: str, args: dict) -> str:
             return get_frontmost_window()
         if name == "shell":
             _policy.check_shell()
-            return run_shell(args.get("command", ""))
+            cmd = args.get("command", "")
+            if not _approval("run_shell", cmd):
+                return "(用户拒绝执行该命令: 界面审批未通过; 请调整方案或直接总结)"
+            return run_shell(cmd)
         if name == "append_memory":
             return _memory.append(args.get("key", "default"), args.get("value", ""))
         if name == "recall_memory":

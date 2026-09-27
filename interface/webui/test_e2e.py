@@ -137,11 +137,21 @@ def main() -> None:
         body = r.read().decode("utf-8")
     check("已关闭任务 after_seq 超尾仍补发 close", "event: close" in body)
 
-    # 6) 边界: 未知框架 422 / 未知任务 404
+    # 6) 边界: 未知框架 422 / 未知任务 404 / 审批端点
     s, e = _req("/api/tasks", {"goal": "x", "framework": "nope"}, method="POST")
     check("未知框架 422", s == 422 and e.get("error", {}).get("code") == "unknown_framework")
     s, e = _req("/api/tasks/t-nope")
     check("未知任务 404", s == 404 and e.get("error", {}).get("code") == "task_not_found")
+    s, e = _req("/api/tasks/t-nope/approval",
+                {"approval_id": "a-1", "approved": True}, method="POST")
+    check("审批: 未知任务 404",
+          s == 404 and e.get("error", {}).get("code") == "task_not_found", str(e))
+    s, e = _req(f"/api/tasks/{t3['task_id']}/approval",
+                {"approval_id": "a-1", "approved": True}, method="POST")
+    check("审批: 无待处理请求 409", s == 409
+          and e.get("error", {}).get("code") == "no_pending_approval", str(e))
+    s, e = _req(f"/api/tasks/{t3['task_id']}/approval", {"approved": True}, method="POST")
+    check("审批: 缺 approval_id 422", s == 422, str(e))
 
     # 7) 模型 profile 与 Chat 模式 (依赖 modelservice, 离线时降级验证)
     if models.get("online"):

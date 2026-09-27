@@ -8,7 +8,7 @@ Pydantic AI 适配器 (类型安全 Agent)
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import Callable, Optional
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent as PydAgent
@@ -51,13 +51,14 @@ def run(
     max_steps: Optional[int] = None,
     verbose: bool = False,
     typed: bool = True,
+    approval: Optional[Callable[[dict], bool]] = None,
     **kwargs,
 ) -> dict:
     llm = _build_llm(model)
     agent = PydAgent(
         llm,
         system_prompt=SYSTEM_PROMPT,
-        tools=build_typed_tools(),
+        tools=build_typed_tools(approval=approval),
         model_settings={"max_tokens": settings.LLM_MAX_TOKENS},
         output_type=Answer if typed else str,
     )
@@ -70,7 +71,7 @@ def run(
             agent = PydAgent(
                 llm,
                 system_prompt=SYSTEM_PROMPT,
-                tools=build_typed_tools(),
+                tools=build_typed_tools(approval=approval),
                 model_settings={"max_tokens": settings.LLM_MAX_TOKENS},
             )
             try:

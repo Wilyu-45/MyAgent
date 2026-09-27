@@ -5,6 +5,8 @@
 - 事件统一信封 {seq, ts, task_id, type, ...载荷}; 任务内缓冲供 SSE 断线续传
 - 取消: cancel_flag 置位后, 下一个事件点抛 TaskCancelled 从执行循环退出;
   排队中的任务直接出队置为 cancelled
+- 审批: 高风险操作 (shell) 执行前经 request_approval 阻塞等待界面确认;
+  事件 approval_request/approval_resolved + approve() 回复; 超时/取消视为拒绝
 - 任务历史: 终态任务落盘 memory/ui_tasks.json (启动时恢复, 重启不丢;
   mock 模式单独落盘 ui_tasks.mock.json, 避免演示数据混入正式历史)
 """
@@ -25,6 +27,7 @@ from planner.adapters import run_framework
 
 MAX_EVENTS = 2000      # 单任务事件缓冲上限 (超出裁剪最旧的)
 MAX_HISTORY = 50       # 内存保留的最近任务数
+APPROVAL_TIMEOUT = 120 # 人工审批等待上限 (秒), 超时自动拒绝
 
 HISTORY_FILE = Path(__file__).resolve().parents[2] / "memory" / "ui_tasks.json"
 MOCK_HISTORY_FILE = HISTORY_FILE.with_name("ui_tasks.mock.json")
@@ -57,6 +60,10 @@ class Task:
     subscribers: set = field(default_factory=set)   # asyncio.Queue 集合
     seq: int = 0
     stream_closed: bool = False
+    # 人工审批: approval_id 非 None 表示有等待中的审批 (由执行线程写入/清理)
+    approval_id: Optional[str] = None
+    approval_result: Optional[bool] = None
+    approval_event: threading.Event = field(default_factory=threading.Event)
 
     def summary(self) -> dict:
         return {
@@ -133,6 +140,57 @@ class TaskManager:
             # 运行中: 协作式, 下一个事件点生效
             t.cancel_flag.set()
         return True
+
+    def approve(self, task_id: str, approval_id: str, approved: bool) -> bool:
+        """向等待中的审批请求回复结论; 无匹配请求返回 False (API 层转 409)。"""
+        t = self._tasks.get(task_id)
+        if t is None or t.approval_id is None or t.approval_id != approval_id:
+            return False
+        t.approval_result = approved
+        t.approval_event.set()
+        return True
+
+    def request_approval(self, task: Task, req: dict) -> bool:
+        """请求人工审批并阻塞等待 (由执行线程调用); 返回 True 放行 / False 拒绝。
+
+        超时 (APPROVAL_TIMEOUT)、任务取消、无人处理均视为拒绝 (fail-safe);
+        结论经 approval_resolved 事件通知界面 (取消场景由 close 兜底, 可丢)。
+        """
+        if task.cancel_flag.is_set():
+            return False
+        approval_id = f"a-{uuid.uuid4().hex[:8]}"
+        task.approval_id = approval_id
+        task.approval_result = None
+        task.approval_event.clear()
+        expires_at = time.time() + APPROVAL_TIMEOUT
+        try:
+            self._emit(task, "approval_request", approval_id=approval_id,
+                       tool=str(req.get("tool", "")),
+                       detail=str(req.get("detail", ""))[:1000],
+                       danger_level=str(req.get("danger_level", "risky")),
+                       expires_at=expires_at)
+            verdict: Optional[bool] = None
+            timed_out = False
+            while True:
+                if task.approval_event.wait(0.5):
+                    verdict = bool(task.approval_result)
+                    break
+                if task.cancel_flag.is_set():
+                    break                      # 取消: 视为拒绝
+                if time.time() > expires_at:
+                    timed_out = True
+                    break                      # 超时: 视为拒绝
+            if task.cancel_flag.is_set():
+                verdict = None                 # 取消优先: 恰好收到批准也不执行
+            try:
+                self._emit(task, "approval_resolved", approval_id=approval_id,
+                           approved=bool(verdict), timed_out=timed_out)
+            except TaskCancelled:
+                pass                           # 取消场景 close 事件兜底, resolved 可丢
+            return bool(verdict)
+        finally:
+            task.approval_id = None
+            task.approval_event.clear()
 
     def subscribe(self, task_id: str, after_seq: int
                   ) -> Optional[tuple[Optional[asyncio.Queue], list[dict]]]:
@@ -334,10 +392,15 @@ class TaskManager:
 
         if self._mock:
             return self._execute_mock(task, on_event)
+
+        def on_approval(req: dict) -> bool:
+            return self.request_approval(task, req)
+
         return run_framework(
             task.framework, task.goal,
             model=task.model, max_steps=task.max_steps,
             on_event=on_event, cancel_event=task.cancel_flag,
+            approval=on_approval,
         )
 
     def _execute_mock(self, task: Task, on_event) -> dict:

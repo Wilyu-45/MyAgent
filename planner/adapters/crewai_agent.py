@@ -18,10 +18,12 @@ def run(
     verbose: bool = False,
     on_event: Optional[Callable[[dict], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    approval: Optional[Callable[[dict], bool]] = None,
     **kwargs,
 ) -> dict:
     return run_in_venv(
         FRAMEWORK, goal,
         on_event=on_event, cancel_event=cancel_event,
+        approval_fn=approval,
         model=model, max_steps=max_steps, verbose=verbose,
     )

@@ -1,6 +1,6 @@
 # 智能体交互界面设计（Web · Agent 任务 + Chat 对话）
 
-> 状态：**已实现**（2026-09；双模式 + 框架逐步流式 + 任务历史落盘；验收脚本 `interface/webui/test_e2e.py`、`planner/adapters/test_runner_stream.py` 与 `interface/webui/test_tasks_persist.py`，浏览器端到端复验通过）
+> 状态：**已实现**（2026-09；双模式 + 框架逐步流式 + 任务历史落盘 + 操作审批卡片；验收脚本 `interface/webui/test_e2e.py`、`planner/adapters/test_runner_stream.py`、`interface/webui/test_tasks_persist.py` 与 `interface/webui/test_approval.py`，浏览器端到端复验通过）
 > 代码位置：`interface/webui/`（用户交互层）；后续规划见 `ROADMAP.md`
 > 关联：`framework.md`（总体架构）、`PRINCIPLES.md`（开发原则）、`INTEGRATION.md`（多框架集成）
 
@@ -13,7 +13,7 @@
   - **Chat 对话**：直连本地模型逐 token 流式回复（chat 配置模型，不经过编排）。
 - **技术选型**：FastAPI + SSE（任务流）+ fetch 流式（对话流）。零新增依赖（`myagent` venv 已含 fastapi / uvicorn / httpx）。
 - **运行**：`python -m interface.webui`，默认 `http://127.0.0.1:8100`（与模型服务 8000 分离）。
-- **兼容性**：仅对 `planner/agent.py` 与适配层做向后兼容扩展（可选 `on_event` 回调，默认 None 时行为不变）；`modelservice` 代码不改动，`models.json` 仅增加 `profile` 元数据字段。
+- **兼容性**：仅对 `planner/agent.py` 与适配层做向后兼容扩展（可选 `on_event` / `approval` 回调，默认 None 时行为不变）；`modelservice` 代码不改动，`models.json` 仅增加 `profile` 元数据字段。
 
 ---
 
@@ -52,7 +52,7 @@
 │  ├─ Chat 代理: 转发 modelservice /v1/chat/completions  │
 │  └─ 静态页托管 + 模型服务查询代理                       │
 └────┬──────────────────────────────────────────────────┘
-     │ run_framework(fw, goal, on_event=emit)    (Agent 任务, 小幅扩展)
+     │ run_framework(fw, goal, on_event=emit, approval=ask)   (Agent 任务, 小幅扩展)
      ▼
 ┌───────────────────────────────────────────────────────┐
 │  modelservice (localhost:8000, OpenAI 兼容, 零改动)    │
@@ -112,6 +112,8 @@ myagent\Scripts\python.exe -m interface.webui --mock       # Agent 任务离线�
 | `result` | 最终答复卡片（绿 ✅；`max_steps_exceeded` 黄 ⚠） |
 | `error` | 红色错误卡片 ❌ |
 | `queued` | "排队中（前面还有 N 个）" |
+| `approval_request` | 🛡️ 审批卡片（工具 + 命令 + 危险级别 + 批准 / 拒绝按钮 + 等待提示） |
+| `approval_resolved` | 审批卡片收尾（移除按钮，标"已批准 / 已拒绝 / 超时自动拒绝"） |
 
 - 断线重连按 `seq` 去重续接，不丢不重；所有文本经 `textContent` 渲染（防 XSS）。
 
@@ -156,6 +158,7 @@ Base：`http://127.0.0.1:8100`
 | GET | `/api/tasks` | 最近任务列表 |
 | GET | `/api/tasks/{id}` | 任务快照（断线恢复 / 历史回看） |
 | POST | `/api/tasks/{id}/cancel` | 取消（协作式） |
+| POST | `/api/tasks/{id}/approval` | 提交审批决定（批准 / 拒绝；404 `task_not_found` / 409 `no_pending_approval`） |
 | GET | `/api/tasks/{id}/events` | SSE 任务事件流（`after_seq` / `Last-Event-ID` 续传 + 15s 心跳） |
 | GET | `/api/health` `/health` | 健康检查 |
 
@@ -163,6 +166,7 @@ Base：`http://127.0.0.1:8100`
 
 ```json
 POST /api/tasks        {"goal": "…", "framework": "langgraph", "model": null, "max_steps": 8}
+POST /api/tasks/{id}/approval  {"approval_id": "a-…", "approved": true}
 POST /api/chat/stream  {"model": "qwen3.5-9b-chat", "messages": [{"role": "user", "content": "…"}], "max_tokens": null}
 ```
 
@@ -187,6 +191,8 @@ POST /api/chat/stream  {"model": "qwen3.5-9b-chat", "messages": [{"role": "user"
 | `result` | `{status, final_answer, steps, elapsed_ms, trace}` | 最终答复卡片 |
 | `error` | `{message}` | 红色错误卡片 |
 | `cancelled` | `{}` | "已取消"徽标 |
+| `approval_request` | `{approval_id, tool, detail, danger_level, expires_at}` | 🛡️ 审批卡片 + 批准 / 拒绝按钮 |
+| `approval_resolved` | `{approval_id, approved, timed_out}` | 卡片收尾（按钮移除 + 结果徽标） |
 | `close` | `{}` | 客户端关闭 EventSource |
 
 ### 7.2 对话流（Chat 模式）
@@ -222,6 +228,16 @@ LangGraph 路径（`planner/agent.py` 的 `run()` 循环内）：
 | `smolagents` | 每个 ActionStep → `log` | `CodeAgent(step_callbacks=[单参回调])`，取 tool_calls / observations / model_output | `on_event` 抛异常（步骤边界生效；旧版无 `step_callbacks` 时自动回退 basic） |
 | `pydantic-ai` `llamaindex` | 仅开始/结束（basic） | 无稳定步骤钩子 | 无执行中打断点：运行结束后由工作线程统一置 `cancelled` |
 
+审批（2026-09 P2 交付，向后兼容——`approval=None` 时行为不变）：
+
+| 链路 | 拦截点 | 协议 |
+| :--- | :--- | :--- |
+| 进程内（`langgraph` / `pydantic-ai` / `smolagents` / `llamaindex`） | 工具注册表 `run_shell` 包装 | `approval(req)` 同步回调；拒绝 → 工具不执行，回填拒绝文本给模型继续收尾 |
+| `mcp` | ReAct 主循环（`APPROVAL_TOOLS = {"run_shell"}`，不侵入 MCP 服务器） | 同上 |
+| `crewai` / `autogen` | 子进程 runner 内 shell 工具 | stdout `__APPROVAL__{json}` 哨兵（不转 `log`）→ 界面回调 → stdin 回写 `{"approved": bool}`；`AGENT_APPROVAL=1` 开启（CLI 直跑默认放行；EOF / 异常 fail-safe 拒绝） |
+
+- 界面语义：`TaskManager.request_approval` 阻塞等待（0.5s 轮询；`APPROVAL_TIMEOUT=120s` 超时自动拒绝）；任务取消优先于审批结果；`approval_request` / `approval_resolved` 事件见 §7.1。
+
 ---
 
 ## 8. 后端模块
@@ -235,10 +251,11 @@ interface/webui/
 ├── chat.py          # Chat 流式代理 (modelservice → delta/done/error)
 ├── test_e2e.py      # 冒烟验收脚本 (离线自动降级)
 ├── test_tasks_persist.py  # 任务历史落盘冒烟 (离线)
+├── test_approval.py # 操作审批冒烟 (注册表 / 图链路 / TaskManager, 离线)
 └── static/          # index.html / style.css / app.js (原生, 无 CDN)
 ```
 
-- **TaskManager**：`queue.Queue` + 1 个 daemon 工作线程；任务历史最近 50 条，终态任务原子落盘 `memory/ui_tasks.json`（启动恢复；mock 单独 `ui_tasks.mock.json`）；`--mock` 用 `ScriptedLLM` 离线演示。
+- **TaskManager**：`queue.Queue` + 1 个 daemon 工作线程；任务历史最近 50 条，终态任务原子落盘 `memory/ui_tasks.json`（启动恢复；mock 单独 `ui_tasks.mock.json`）；`--mock` 用 `ScriptedLLM` 离线演示；审批请求阻塞等待（`APPROVAL_TIMEOUT=120s` 超时自动拒绝，任务取消优先）。
 - **chat.py**：httpx 流式转发 `/v1/chat/completions`，读超时 600s（覆盖模型懒加载）；上游异常转 `error` 事件，不抛出。
 
 ---
@@ -274,6 +291,17 @@ interface/webui/
 | `interface/webui/test_tasks_persist.py` | 新增离线冒烟（落盘 / 恢复 / 取消 / 容错 / 裁剪，21 项） | 独立运行，不影响其他入口 |
 | `.gitignore` | 忽略 `memory/*.json` 运行时数据 | — |
 
+（2026-09 P2 操作审批卡片：追加改动）
+
+| 文件 | 改动 | 兼容性 |
+| :--- | :--- | :--- |
+| `planner/tools.py` / `agent.py` / `tool_wrappers.py` / 各适配器 / `run_framework` | `approval` 可选回调透传：工具注册表 `shell` 包装拦截 + `mcp` 主循环拦截 | 默认 None ⇒ 全部旧行为不变 |
+| `planner/adapters/base.py` / `runners/{crewai,autogen}_runner.py` | 子进程审批协议：stdout `__APPROVAL__` 哨兵 + stdin 回复（`AGENT_APPROVAL=1` 开启） | 无回调 / CLI 直跑直接放行；EOF fail-safe 拒绝 |
+| `interface/webui/tasks.py` | `request_approval` 阻塞等待（120s 超时自动拒绝、取消优先）+ `approve()` | 无审批调用路径行为不变 |
+| `interface/webui/app.py` | `POST /api/tasks/{id}/approval`（404 / 409） | 新增端点 |
+| `interface/webui/static/{app.js,style.css}` | 审批卡片（🛡️ 批准 / 拒绝 / 超时）渲染与交互 | 纯新增 |
+| `interface/webui/test_approval.py` | 新增离线冒烟（注册表 / 图链路 / TaskManager，22 项） | 独立运行，不影响其他入口 |
+
 ---
 
 ## 10. 验收与已知限制
@@ -284,6 +312,7 @@ interface/webui/
 myagent\Scripts\python.exe -m interface.webui --mock --port 8100
 myagent\Scripts\python.exe -m interface.webui.test_e2e
 myagent\Scripts\python.exe -m interface.webui.test_tasks_persist   # 离线, 无需起服务
+myagent\Scripts\python.exe -m interface.webui.test_approval        # 离线, 无需起服务
 ```
 
 - 离线（mock）：端点 / 事件序列 `queued→started→thought→tool→tool_result→result→close` / 取消 / 续传兜底 / 边界；
@@ -296,4 +325,5 @@ myagent\Scripts\python.exe -m interface.webui.test_tasks_persist   # 离线, 无
 2. 取消为协作式：`crewai / autogen` 子进程即时终止（实测 ≤0.5s）；`mcp / smolagents` 在循环 / 步骤边界生效；`pydantic-ai / llamaindex` 无执行中打断点（结束后置为 cancelled）。
 3. 任务历史落盘（重启不丢，仅最近 50 条终态任务；运行中任务不恢复）；Chat 对话无服务端状态——重启 / 清空即丢（P2 增强）。
 4. Agent 任务单并发（单卡 VRAM 约束，非缺陷）。
-5. Chat 暂无 Markdown 渲染与续传（P2 增强，见 `ROADMAP.md`）。
+5. 审批等待阻塞工作线程（单线程串行）：等待期间其他任务排队，最长 120s 超时自动拒绝。
+6. Chat 暂无 Markdown 渲染与续传（P2 增强，见 `ROADMAP.md`）。

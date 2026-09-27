@@ -14,9 +14,14 @@ from ..tools import ToolRegistry, default_registry
 
 def build_typed_tools(
     registry: Optional[ToolRegistry] = None,
+    approval: Optional[Callable[[dict], bool]] = None,
 ) -> list[Callable[..., str]]:
-    """返回类型化工具函数列表 (全部绑定同一个 ToolRegistry)。"""
-    reg = registry or default_registry()
+    """返回类型化工具函数列表 (全部绑定同一个 ToolRegistry)。
+
+    approval: 可选人工审批回调; 仅在未显式传入 registry 时生效
+        (透传给 default_registry 的 Shell 等高风险工具)。
+    """
+    reg = registry or default_registry(approval=approval)
 
     def get_time() -> str:
         """获取当前日期和时间。"""

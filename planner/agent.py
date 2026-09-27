@@ -32,9 +32,10 @@ class Agent:
         model: Optional[str] = None,
         max_steps: Optional[int] = None,
         verbose: bool = False,
+        approval: Optional[Callable[[dict], bool]] = None,
     ):
         self.llm = llm if llm is not None else build_llm(model=model)
-        self.registry = registry or default_registry()
+        self.registry = registry or default_registry(approval=approval)
         self.max_steps = max_steps or settings.MAX_STEPS
         self.verbose = verbose
         self.graph = build_agent(self.llm, self.registry)

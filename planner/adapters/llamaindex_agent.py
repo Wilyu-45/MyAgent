@@ -7,7 +7,7 @@ modelservice; 工具经 FunctionTool 包装 (原生函数调用由 modelservice 
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import Callable, Optional
 
 from llama_index.core.agent.workflow import AgentWorkflow
 from llama_index.core.tools import FunctionTool
@@ -25,9 +25,9 @@ SYSTEM_PROMPT = (
 )
 
 
-def _build_tools():
+def _build_tools(approval: Optional[Callable[[dict], bool]] = None):
     fts = []
-    for fn in build_typed_tools():
+    for fn in build_typed_tools(approval=approval):
         fts.append(FunctionTool.from_defaults(
             fn=fn,
             name=fn.__name__,
@@ -41,6 +41,7 @@ def run(
     model: Optional[str] = None,
     max_steps: Optional[int] = None,
     verbose: bool = False,
+    approval: Optional[Callable[[dict], bool]] = None,
     **kwargs,
 ) -> dict:
     llm = OpenAILike(
@@ -54,7 +55,7 @@ def run(
     )
     try:
         agent = AgentWorkflow.from_tools_or_functions(
-            tools_or_functions=_build_tools(),
+            tools_or_functions=_build_tools(approval=approval),
             llm=llm,
             system_prompt=SYSTEM_PROMPT,
             verbose=verbose,

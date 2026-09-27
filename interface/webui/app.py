@@ -44,6 +44,13 @@ class TaskCreate(BaseModel):
     max_steps: Optional[int] = Field(default=None, ge=1, le=50)
 
 
+class ApprovalDecision(BaseModel):
+    """人工审批回复 (高风险操作确认)。"""
+
+    approval_id: str = Field(min_length=1, max_length=64)
+    approved: bool
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -215,6 +222,16 @@ def create_app(mock: bool = False) -> FastAPI:
         if mgr().snapshot(task_id) is None:
             return _err(404, "task_not_found", f"未知任务: {task_id}")
         return {"cancelled": mgr().cancel(task_id)}
+
+    @app.post("/api/tasks/{task_id}/approval")
+    async def task_approval(task_id: str, req: ApprovalDecision):
+        """回复等待中的审批请求 (批准/拒绝); 无匹配请求返回 409。"""
+        if mgr().snapshot(task_id) is None:
+            return _err(404, "task_not_found", f"未知任务: {task_id}")
+        if not mgr().approve(task_id, req.approval_id, req.approved):
+            return _err(409, "no_pending_approval",
+                        "没有待处理的审批请求 (可能已超时/已处理/任务已结束)")
+        return {"ok": True, "approved": req.approved}
 
     # ==================== SSE 事件流 ====================
     @app.get("/api/tasks/{task_id}/events")

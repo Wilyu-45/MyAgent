@@ -17,9 +17,10 @@ def run(
     max_steps: Optional[int] = None,
     verbose: bool = False,
     on_event: Optional[Callable[[dict], None]] = None,
+    approval: Optional[Callable[[dict], bool]] = None,
     **kwargs,
 ) -> dict:
-    agent = Agent(model=model, max_steps=max_steps, verbose=verbose)
+    agent = Agent(model=model, max_steps=max_steps, verbose=verbose, approval=approval)
     r = agent.run(goal, on_event=on_event)
     trace = [
         {"type": "message", "content": getattr(m, "content", str(m))}

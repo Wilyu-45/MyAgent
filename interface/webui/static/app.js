@@ -17,7 +17,8 @@ const STATUS_META = {
 };
 const TERMINAL = ["finished", "error", "max_steps_exceeded", "cancelled"];
 const EV_TYPES = ["queued", "started", "thought", "tool", "tool_result",
-                  "log", "result", "error", "cancelled", "close"];
+                  "log", "result", "error", "cancelled", "close",
+                  "approval_request", "approval_resolved"];
 
 /* ==================== 模块状态 ==================== */
 let mode = localStorage.getItem("ui-mode") === "chat" ? "chat" : "agent";
@@ -341,6 +342,7 @@ function createCard(taskId, info) {
   const state = {
     taskId, wrap, timeline, badge,
     timer: null, live: true,
+    approvals: new Map(),   // approvalId -> 待处理审批的行元素
   };
   cards.set(taskId, state);
   scrollDown(true);
@@ -365,6 +367,38 @@ function finishCard(card) {
     setRunning(false);
     loadHistory();
     refreshHealth();
+  }
+}
+
+/* 审批卡片收尾: 移除按钮/提示, 追加结论 (cls: ok|no|timeout|stale) */
+function resolveApprovalRow(row, cls, text) {
+  const btns = row.querySelector(".approval-btns");
+  if (btns) btns.remove();
+  const hint = row.querySelector(".approval-hint");
+  if (hint) hint.remove();
+  row.classList.add(cls);
+  const body = row.querySelector(".approval-body");
+  if (body) body.appendChild(el("div", "verdict", text));
+}
+
+/* 提交审批决定; 成功后等 approval_resolved 事件更新卡片, 失败恢复按钮可重试 */
+async function decideApproval(card, approvalId, approved, row) {
+  const btns = row.querySelectorAll(".approval-btns button");
+  for (const b of btns) b.disabled = true;
+  try {
+    const r = await fetch(`/api/tasks/${card.taskId}/approval`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approval_id: approvalId, approved }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      toast((d.error && d.error.message) || "审批提交失败");
+      for (const b of btns) b.disabled = false;
+    }
+  } catch (e) {
+    toast("审批提交失败: " + e.message);
+    for (const b of btns) b.disabled = false;
   }
 }
 
@@ -452,7 +486,42 @@ function renderEvent(card, ev) {
       tl.appendChild(el("div", "ev log", "任务已取消"));
       break;
     }
+    case "approval_request": {
+      const row = el("div", "ev approval");
+      row.appendChild(el("span", "ic", "🛡️"));
+      const body = el("div", "approval-body");
+      body.appendChild(el("div", "approval-title", "高风险操作请求确认"));
+      body.appendChild(el("code", "approval-cmd", ev.detail || ""));
+      const btns = el("div", "approval-btns");
+      const ok = el("button", "ok", "批准执行");
+      const no = el("button", "no", "拒绝");
+      ok.addEventListener("click", () => decideApproval(card, ev.approval_id, true, row));
+      no.addEventListener("click", () => decideApproval(card, ev.approval_id, false, row));
+      btns.appendChild(ok);
+      btns.appendChild(no);
+      body.appendChild(btns);
+      body.appendChild(el("div", "approval-hint", "等待确认中, 超时将自动拒绝"));
+      row.appendChild(body);
+      tl.appendChild(row);
+      card.approvals.set(ev.approval_id, row);
+      break;
+    }
+    case "approval_resolved": {
+      const row = card.approvals.get(ev.approval_id);
+      if (row) {
+        card.approvals.delete(ev.approval_id);
+        const cls = ev.timed_out ? "timeout" : (ev.approved ? "ok" : "no");
+        const text = ev.timed_out ? "⏱ 超时自动拒绝"
+          : (ev.approved ? "✔ 已批准执行" : "✘ 已拒绝执行");
+        resolveApprovalRow(row, cls, text);
+      }
+      break;
+    }
     case "close": {
+      for (const row of card.approvals.values()) {   // 残留的待审批: 标记失效
+        resolveApprovalRow(row, "stale", "已失效 (任务已结束)");
+      }
+      card.approvals.clear();
       finishCard(card);
       break;
     }

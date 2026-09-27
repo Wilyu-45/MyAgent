@@ -32,7 +32,7 @@ D:\agent\
 │   ├── agent.py / graph.py / state.py / prompts.py / llm.py / tools.py   LangGraph 编排 (原集成)
 │   └── adapters\                     ★ 本次新增: 多框架统一适配层
 │       ├── __init__.py               框架注册表 + run_framework() 统一入口
-│       ├── base.py                   结果结构 + 隔离 venv 流式执行 (哨兵协议 / 即时终止)
+│       ├── base.py                   结果结构 + 隔离 venv 流式执行 (哨兵协议 / 即时终止 / 审批)
 │       ├── tool_wrappers.py          类型化工具 (签名+Google docstring)
 │       ├── langgraph_agent.py        LangGraph 适配器
 │       ├── pydantic_ai_agent.py      Pydantic AI 适配器 (结构化输出+自动回退)
@@ -141,6 +141,14 @@ for fw in ["langgraph", "pydantic-ai", "smolagents", "llamaindex", "mcp", "crewa
   本地模型不支持原生函数调用，用文本 ReAct 手动循环（AssistantAgent.on_messages），
   循环逐步输出进度行。
 
+### 审批接入（2026-09 P2，向后兼容）
+
+高风险操作（`run_shell`）执行前可经统一 `approval(req) -> bool` 回调请求确认
+（`run_framework(..., approval=...)` 可选参数，缺省行为不变）：进程内框架与 `mcp`
+在工具注册表 / ReAct 循环拦截；`crewai / autogen` 子进程用 stdout `__APPROVAL__`
+哨兵 + stdin 回复（`AGENT_APPROVAL=1` 时启用，CLI 直跑默认放行）。拒绝时不执行并
+回填拒绝文本；协议细节见 `UI_DESIGN.md` §7.3。
+
 ## 7. 验证结果（2026-08 实测）
 
 | 框架 | 状态 | 说明 |
@@ -155,6 +163,10 @@ for fw in ["langgraph", "pydantic-ai", "smolagents", "llamaindex", "mcp", "crewa
 
 2026-09 P2-1 复验：crewai / autogen / mcp / smolagents 逐活动流式与运行中取消
 （≤0.5s；smolagents 在步骤边界）全部通过；离线冒烟 20 项、界面 e2e 29 项全绿。
+
+2026-09 P2 复验：7 框架审批接入（批准 / 拒绝 / 无回调放行）通过；离线冒烟 26 项、
+审批专项 22 项、界面 e2e 32 项全绿；crewai / autogen 子进程协议实跑（批准执行、
+EOF fail-safe 拒绝）通过。
 
 ## 8. 框架管理体系（升级 / 新增 / 验证）
 

@@ -9,9 +9,13 @@ runner 输出协议 (stdout, 每行实时读取):
   - 进度行: 任意文本, 转发为 on_event 的 log 事件 (ANSI 与 \r 已清理);
   - 结果行: "__RESULT__{json}" 哨兵 (容忍行首粘连噪声、超长与尾部残留);
     兼容旧协议: 以 "{" 开头的纯 JSON 结果行 (含 status/final_answer) 亦被识别。
+  - 审批行: "__APPROVAL__{json}" 哨兵 (高风险操作需人工确认时由 runner 发出),
+    父进程解析后调用 approval_fn, 并往子进程 stdin 回写 {"approved": bool} 一行;
+    仅当提供 approval_fn 时才启用 (env AGENT_APPROVAL=1); 审批行不转日志。
 
 取消 (协作式, 双路径):
   - on_event 回调抛异常 (如界面层 TaskCancelled) -> 立即终止子进程并透传;
+    审批回调抛异常同理 (先杀子进程再透传);
   - cancel_event 置位 -> 轮询发现后终止子进程, 返回 status="cancelled"。
 """
 from __future__ import annotations
@@ -38,6 +42,8 @@ RUNNERS_DIR = PROJECT_ROOT / "planner" / "adapters" / "runners"
 
 # runner 结果行哨兵 (与各 *_runner.py 中的字面量保持一致)
 RESULT_PREFIX = "__RESULT__"
+# 审批请求行哨兵: runner 以此询问高风险操作可否执行, 父进程经 stdin 回复
+APPROVAL_PREFIX = "__APPROVAL__"
 
 RUN_TIMEOUT = 1800      # 子进程总超时 (秒)
 _POLL_SEC = 0.5         # 取消 / 超时轮询间隔
@@ -97,9 +103,14 @@ def run_in_venv(
     goal: str,
     on_event: Optional[Callable[[dict], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    approval_fn: Optional[Callable[[dict], bool]] = None,
     **kwargs: Any,
 ) -> dict:
-    """在隔离 venv 中执行 runner 脚本, 流式读取 stdout (协议见模块开头说明)。"""
+    """在隔离 venv 中执行 runner 脚本, 流式读取 stdout (协议见模块开头说明)。
+
+    approval_fn: 可选人工审批回调; 提供时启用 __APPROVAL__ 通道 (env 注入
+        AGENT_APPROVAL=1 并挂载 stdin), 未提供时 runner 内部直接放行。
+    """
     venv_python = VENV_PYTHON.get(framework)
     runner = RUNNERS_DIR / f"{framework}_runner.py"
     if venv_python is None or not venv_python.is_file():
@@ -120,9 +131,12 @@ def run_in_venv(
             cmd += [f"--{k.replace('_', '-')}", str(v)]
 
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+    if approval_fn is not None:
+        env["AGENT_APPROVAL"] = "1"
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE if approval_fn is not None else None,
             text=True, encoding="utf-8", errors="replace",
             cwd=str(PROJECT_ROOT), env=env, bufsize=1,
         )
@@ -174,6 +188,22 @@ def run_in_venv(
             if not full:
                 continue
 
+            apos = full.find(APPROVAL_PREFIX)
+            if apos >= 0:                 # 审批请求行: 不转日志, 回调后经 stdin 回复
+                req = _parse_first_json(full[apos + len(APPROVAL_PREFIX):]) or {}
+                try:
+                    ok = bool(approval_fn(req)) if approval_fn is not None else False
+                except BaseException:     # 界面取消等异常: 先杀子进程再透传
+                    _kill()
+                    raise
+                try:
+                    if proc.stdin is not None:
+                        proc.stdin.write(json.dumps({"approved": ok}) + "\n")
+                        proc.stdin.flush()
+                except Exception:
+                    pass
+                continue
+
             pos = full.find(RESULT_PREFIX)
             if pos >= 0:                  # 哨兵结果行: 容忍前缀不在行首与尾部噪声
                 obj = _parse_first_json(full[pos + len(RESULT_PREFIX):])
@@ -197,6 +227,11 @@ def run_in_venv(
                     _kill()
                     raise
 
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
         try:
             proc.wait(timeout=5)
         except Exception:

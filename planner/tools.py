@@ -145,10 +145,14 @@ def _get_foreground(args: dict) -> str:
 def default_registry(
     policy: Optional[SandboxPolicy] = None,
     memory: Optional[Memory] = None,
+    approval: Optional[Callable[[dict], bool]] = None,
 ) -> ToolRegistry:
     """构建默认工具集: 文件 / 系统感知 / 记忆 / Shell。
 
     默认沙箱: 只允许操作 settings.WORKSPACE, Shell 默认开启 (可用 allow_shell=False 关闭)。
+    approval: 可选人工审批回调 (界面层使用)。Shell 等高风险操作执行前调用,
+        入参 {"tool", "detail", "danger_level"}, 返回 True 放行 / False 拒绝;
+        默认 None 时不弹审批直接放行 (CLI 行为不变)。
     """
     policy = policy or SandboxPolicy([settings.WORKSPACE], allow_shell=True)
     memory = memory or Memory(settings.MEMORY_FILE)
@@ -214,7 +218,7 @@ def default_registry(
             parameters={
                 "command": {"type": "string", "description": "要执行的命令"}
             },
-            func=lambda a: _shell_guarded(a, policy),
+            func=lambda a: _shell_guarded(a, policy, approval),
             danger_level="risky",
         ),
         ToolSpec(
@@ -238,7 +242,13 @@ def default_registry(
     return ToolRegistry(specs)
 
 
-def _shell_guarded(args: dict, policy: SandboxPolicy) -> str:
-    """Shell 工具: 先过沙箱审批再执行。"""
+def _shell_guarded(args: dict, policy: SandboxPolicy,
+                   approval: Optional[Callable[[dict], bool]] = None) -> str:
+    """Shell 工具: 先过沙箱策略, 再经人工审批 (若接入) 后执行。"""
     policy.check_shell()
-    return run_shell(str(args.get("command", "")))
+    command = str(args.get("command", ""))
+    if approval is not None:
+        req = {"tool": "run_shell", "detail": command, "danger_level": "risky"}
+        if not approval(req):
+            return "(用户拒绝执行该命令: 界面审批未通过; 请调整方案或直接总结)"
+    return run_shell(command)
