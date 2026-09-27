@@ -1,6 +1,7 @@
 [
   {
     "id": "qwen3.5-9b-uncensored",
+    "profile": "agent",
     "model_path": "models/model1/Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-MTP-Q4_K_M.gguf",
     "mmproj_path": "models/model1/mmproj-BF16.gguf",
     "chat_handler": "qwen2.5vl",
@@ -16,6 +17,7 @@
   },
   {
     "id": "qwythos-9b-claude",
+    "profile": "agent",
     "model_path": "models/model2/Qwythos-9B-Claude-Mythos-5-1M-uncensored-heretic-Q5_K_M.gguf",
     "mmproj_path": "models/model2/Qwythos-9B-Claude-Mythos-5-1M-uncensored-heretic-mmproj-BF16.gguf",
     "chat_handler": "qwen2.5vl",
@@ -31,6 +33,7 @@
   },
   {
     "id": "qwen3.5-9b-chat",
+    "profile": "chat",
     "model_path": "models/model1/Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-MTP-Q4_K_M.gguf",
     "mmproj_path": "models/model1/mmproj-BF16.gguf",
     "chat_handler": "qwen2.5vl",
@@ -46,6 +49,7 @@
   },
   {
     "id": "qwythos-9b-chat",
+    "profile": "chat",
     "model_path": "models/model2/Qwythos-9B-Claude-Mythos-5-1M-uncensored-heretic-Q5_K_M.gguf",
     "mmproj_path": "models/model2/Qwythos-9B-Claude-Mythos-5-1M-uncensored-heretic-mmproj-BF16.gguf",
     "chat_handler": "qwen2.5vl",

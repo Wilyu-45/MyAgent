@@ -10,13 +10,14 @@ Agent 高层 API: 封装图编译、运行与结果汇总。
 from __future__ import annotations
 
 import uuid
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage
 
 from .config import settings
 from .graph import build_agent
 from .llm import build_llm
+from .prompts import parse_llm_json
 from .state import AgentState
 from .tools import ToolRegistry, default_registry
 
@@ -39,12 +40,19 @@ class Agent:
         self.graph = build_agent(self.llm, self.registry)
 
     # ---------------- 运行 ----------------
-    def run(self, goal: str, thread_id: Optional[str] = None) -> dict:
+    def run(
+        self,
+        goal: str,
+        thread_id: Optional[str] = None,
+        on_event: Optional[Callable[[dict], None]] = None,
+    ) -> dict:
         """运行一个任务目标, 返回结果摘要。
 
         Args:
             goal: 用户自然语言目标
             thread_id: LangGraph 检查点线程 id (同一 id 可续跑/回溯)
+            on_event: 可选事件回调 (界面层使用); 按图节点派生 thought/tool/
+                tool_result/log 事件。回调内抛异常可中断执行 (协作式取消)。
 
         Returns:
             {thread_id, goal, status, final_answer, steps, messages, trace}
@@ -63,11 +71,47 @@ class Agent:
             "retries_left": 2,
         }
 
-        # 流式执行: 逐节点输出 (verbose 时打印)
+        # 流式执行: 逐节点输出 (verbose 时打印; on_event 时派生界面事件)
+        tools_done = 0        # 已完成的工具调用数 (事件中的步骤编号)
+        last_tool: dict = {}  # 最近一次解析出的工具调用 (name/args)
         for event in self.graph.stream(initial, config, stream_mode="updates"):
             for node, update in event.items():
                 if self.verbose:
                     self._print_event(node, update)
+                if on_event is None:
+                    continue
+                if node == "call_model":
+                    msgs = update.get("messages") or []
+                    content = getattr(msgs[-1], "content", "") if msgs else ""
+                    if not isinstance(content, str):
+                        content = str(content)
+                    obj = parse_llm_json(content) or {}
+                    on_event({
+                        "type": "thought",
+                        "step": tools_done + 1,
+                        "content": content,
+                        "thought": obj.get("thought"),
+                    })
+                    if obj.get("action"):
+                        last_tool = {
+                            "name": str(obj.get("action")),
+                            "args": obj.get("action_input") or {},
+                        }
+                        on_event({"type": "tool", "step": tools_done + 1, **last_tool})
+                elif node == "execute_tool":
+                    tools_done += 1
+                    on_event({
+                        "type": "tool_result",
+                        "step": update.get("step", tools_done),
+                        "name": last_tool.get("name", ""),
+                        "content": update.get("tool_output", ""),
+                    })
+                elif node in ("ask_retry", "wrap_up"):
+                    on_event({
+                        "type": "log",
+                        "line": "模型输出无法解析, 追加纠错消息重试" if node == "ask_retry"
+                        else "达到最大步数, 请求模型收尾",
+                    })
 
         # 从检查点读取权威最终状态 (含完整消息历史)
         snapshot = self.graph.get_state(config)

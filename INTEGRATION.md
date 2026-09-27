@@ -42,8 +42,10 @@ D:\agent\
 │       └── runners\
 │           ├── crewai_runner.py      CrewAI runner (隔离 venv 内运行)
 │           └── autogen_runner.py     AutoGen runner (隔离 venv 内运行)
+├── interface\webui\                  Web 交互界面 (用户交互层: Agent 任务 + Chat 对话)
 ├── mcp_server_local.py               本地 MCP 服务器 (FastMCP, 演示用)
 ├── demo_multi_framework.py           多框架对比演示脚本
+├── framework.md / INTEGRATION.md / UI_DESIGN.md / PRINCIPLES.md / ROADMAP.md   项目文档
 ├── myagent\                          主虚拟环境 (langgraph/pydantic-ai/smolagents/llama-index/mcp)
 ├── myagent_crewai\                   隔离 venv (crewai)
 └── myagent_autogen\                  隔离 venv (autogen)
@@ -72,7 +74,12 @@ D:\agent\
 cd D:\agent\modelservice
 ..\myagent\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
 
-# 2) 单框架运行 (--framework 切换)
+# 2) Web 交互界面 (Agent 任务 + Chat 对话)
+cd D:\agent
+myagent\Scripts\python.exe -m interface.webui                 # http://127.0.0.1:8100
+myagent\Scripts\python.exe -m interface.webui --mock --open   # Agent 任务离线演示 (无需模型服务)
+
+# 3) 单框架运行 (--framework 切换)
 cd D:\agent
 myagent\Scripts\python.exe -m planner "列出 D:\agent 目录下的文件" --framework langgraph
 myagent\Scripts\python.exe -m planner "列出 D:\agent 目录下的文件" --framework pydantic-ai
@@ -82,10 +89,10 @@ myagent\Scripts\python.exe -m planner "列出 D:\agent 目录下的文件" --fra
 myagent\Scripts\python.exe -m planner "列出 D:\agent 目录下的文件" --framework crewai
 myagent\Scripts\python.exe -m planner "列出 D:\agent 目录下的文件" --framework autogen
 
-# 3) 全框架对比
+# 4) 全框架对比
 myagent\Scripts\python.exe demo_multi_framework.py "列出 D:\agent 目录下的文件"
 
-# 4) 查看工具与框架
+# 5) 查看工具与框架
 myagent\Scripts\python.exe -m planner --list-tools
 ```
 

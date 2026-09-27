@@ -114,9 +114,28 @@
 
 ## 五、部署与运行建议
 
-- 将 Agent 主程序作为常驻服务（类似后台进程），暴露 WebSocket 或 REST API 与前端交互。
+- 将 Agent 主程序作为常驻服务（类似后台进程），暴露 WebSocket 或 REST API 与前端交互。*（已实现：`interface/webui` 常驻服务，REST + SSE，详见第六节）*
 - 使用异步事件循环，避免阻塞屏幕操作。
 - 日志系统详细记录每一步，便于调试。
 - 初始版本可先实现命令行操作和简单 GUI 自动化（如 `pyautogui` + `subprocess`），逐步增加视觉规划。
+
+---
+
+## 六、实现状态与目录映射（2026-09）
+
+| 层 | 目录 | 状态 |
+| :--- | :--- | :--- |
+| 用户交互层 | `interface/webui`（Web 界面）；CLI 入口 `python -m planner` | Web 已实现（Agent 任务 + Chat 对话双模式） |
+| 任务规划与执行层 | `planner/`（LangGraph 核心 + `planner/adapters/` 多框架适配） | 已实现（7 框架） |
+| 感知层 | `perception/` | 基础（前台窗口 / 系统信息） |
+| 行动层 | `action/` | 基础（Shell 执行） |
+| 记忆层 | `memory/` | 基础（JSON 长期记忆） |
+| 工具与扩展层 | `planner/tools.py`（工具注册表）+ `tools/`（MinerU 文档解析） | 已实现 |
+| 安全与沙箱层 | `sandbox/` | 基础（路径 / 命令策略） |
+| 本地大模型服务 | `modelservice/` | 已实现（OpenAI 兼容；models.json 含 agent/chat 双配置） |
+
+- 依赖方向：`interface → planner → (perception / action / memory / sandbox) → modelservice`，禁止反向依赖（见 `PRINCIPLES.md`）。
+- 文档索引：`PRINCIPLES.md`（开发原则）、`ROADMAP.md`（路线图与功能差距）、`UI_DESIGN.md`（界面设计）、`INTEGRATION.md`（多框架集成）。
+- 视觉/鼠标键盘等尚未覆盖的能力清单见 `ROADMAP.md`。
 
 ---

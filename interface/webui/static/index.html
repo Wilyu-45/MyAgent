@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent 交互界面</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <div class="brand">🤖 Agent</div>
+  <div class="mode-switch" id="mode-switch" role="tablist" aria-label="交互模式">
+    <button id="mode-agent" class="mode-btn active" data-mode="agent"
+            title="任务规划: 多步执行 + 工具调用 (agent 配置模型)">Agent 任务</button>
+    <button id="mode-chat" class="mode-btn" data-mode="chat"
+            title="对话: 直连本地模型 (chat 配置模型)">Chat 对话</button>
+  </div>
+  <div class="status" id="ms-status">
+    <span class="dot" id="ms-dot"></span><span id="ms-text">连接中…</span>
+  </div>
+  <label class="agent-only">框架 <select id="sel-framework" title="Agent 框架"></select></label>
+  <label>模型 <select id="sel-model" title="本地模型 (agent/chat 配置来自 models.json)"></select></label>
+  <label class="agent-only">步数 <input id="inp-steps" type="number" value="8" min="1" max="50" title="最大步数"></label>
+  <button id="btn-sidebar" class="ghost" title="侧栏">☰</button>
+</header>
+
+<main>
+  <section id="taskview">
+    <div id="messages">
+      <div class="empty-hint" id="empty-hint">
+        输入任务目标开始，例如：<code>列出 D:\agent 目录下的文件</code>
+      </div>
+    </div>
+    <div id="composer" class="composer">
+      <textarea id="inp-goal" rows="2"
+        placeholder="任务目标…（Enter 发送 / Shift+Enter 换行）"></textarea>
+      <div class="composer-actions">
+        <button id="btn-send" class="primary">发送</button>
+        <button id="btn-cancel" class="danger" hidden>■ 取消</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="chatview" hidden>
+    <div id="chat-messages">
+      <div class="empty-hint" id="chat-hint">
+        与本地模型直接对话（使用 <code>chat</code> 配置模型，不经过 Agent 编排）
+      </div>
+    </div>
+    <div id="chat-composer" class="composer">
+      <textarea id="inp-chat" rows="2"
+        placeholder="输入消息…（Enter 发送 / Shift+Enter 换行）"></textarea>
+      <div class="composer-actions">
+        <button id="btn-chat-clear" title="清空当前对话 (仅前端保存)">清空对话</button>
+        <button id="btn-chat-send" class="primary">发送</button>
+        <button id="btn-chat-stop" class="danger" hidden>■ 停止</button>
+      </div>
+    </div>
+  </section>
+
+  <aside id="sidebar">
+    <h3>任务历史</h3>
+    <div id="history" class="list"></div>
+    <h3>可用工具</h3>
+    <div id="tools" class="list"></div>
+    <h3>环境</h3>
+    <div id="env" class="list"></div>
+  </aside>
+</main>
+
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

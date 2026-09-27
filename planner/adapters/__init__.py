@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import importlib
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .manifest import load_manifest
 
@@ -38,8 +38,14 @@ def run_framework(
     model: Optional[str] = None,
     max_steps: Optional[int] = None,
     verbose: bool = False,
+    on_event: Optional[Callable[[dict], None]] = None,
     **kwargs: Any,
 ) -> dict:
-    """统一入口: 调用任意框架的 run(), 返回 {framework, goal, status, final_answer, steps, trace}。"""
+    """统一入口: 调用任意框架的 run(), 返回 {framework, goal, status, final_answer, steps, trace}。
+
+    on_event: 可选事件回调 (界面层使用)。langgraph 支持逐步骤事件; 其余
+    框架 P1 阶段仅转发忽略 (由调用方在外层发 started/result)。
+    """
     mod = get_adapter(name)
-    return mod.run(goal=goal, model=model, max_steps=max_steps, verbose=verbose, **kwargs)
+    return mod.run(goal=goal, model=model, max_steps=max_steps, verbose=verbose,
+                   on_event=on_event, **kwargs)
