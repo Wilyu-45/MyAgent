@@ -1,16 +1,30 @@
 """
-适配层公共工具: 结果结构 / 隔离 venv 执行。
+适配层公共工具: 结果结构 / 隔离 venv 流式执行。
 ==========================================
 crewai / autogen 与其他框架存在依赖冲突 (pydantic/openai/langchain 版本),
 因此安装在独立 venv (myagent_crewai / myagent_autogen) 中,
 通过本模块的 run_in_venv() 以子进程方式调用对应 runner 脚本。
+
+runner 输出协议 (stdout, 每行实时读取):
+  - 进度行: 任意文本, 转发为 on_event 的 log 事件 (ANSI 与 \r 已清理);
+  - 结果行: "__RESULT__{json}" 哨兵 (容忍行首粘连噪声、超长与尾部残留);
+    兼容旧协议: 以 "{" 开头的纯 JSON 结果行 (含 status/final_answer) 亦被识别。
+
+取消 (协作式, 双路径):
+  - on_event 回调抛异常 (如界面层 TaskCancelled) -> 立即终止子进程并透传;
+  - cancel_event 置位 -> 轮询发现后终止子进程, 返回 status="cancelled"。
 """
 from __future__ import annotations
 
 import json
+import os
+import queue
+import re
 import subprocess
+import threading
+import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # D:\agent
 
@@ -21,6 +35,14 @@ VENV_PYTHON: dict[str, Path] = {
 }
 
 RUNNERS_DIR = PROJECT_ROOT / "planner" / "adapters" / "runners"
+
+# runner 结果行哨兵 (与各 *_runner.py 中的字面量保持一致)
+RESULT_PREFIX = "__RESULT__"
+
+RUN_TIMEOUT = 1800      # 子进程总超时 (秒)
+_POLL_SEC = 0.5         # 取消 / 超时轮询间隔
+_MAX_LINE = 600         # 单条日志行最大长度 (超出截断)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 def make_result(
@@ -41,8 +63,43 @@ def make_result(
     }
 
 
-def run_in_venv(framework: str, goal: str, **kwargs: Any) -> dict:
-    """在隔离 venv 中执行 runner 脚本 (stdout 最后一行必须是 JSON 结果)。"""
+def _strip_noise(line: str) -> str:
+    """去除 ANSI 转义与 \r (进度条残留)。"""
+    return _ANSI_RE.sub("", line).replace("\r", "").rstrip()
+
+
+def _clean_line(line: str) -> str:
+    """去除残留噪声并截断超长行 (仅用于日志转发)。"""
+    line = _strip_noise(line)
+    if len(line) > _MAX_LINE:
+        line = line[:_MAX_LINE] + " …"
+    return line
+
+
+def _parse_first_json(text: str) -> Optional[dict]:
+    """宽松提取首个 JSON 对象 (容忍前导噪声与尾部残留; 结果行可能超长且与输出粘连)。"""
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text[start:])
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _looks_like_result(obj: Any) -> bool:
+    return isinstance(obj, dict) and "status" in obj and "final_answer" in obj
+
+
+def run_in_venv(
+    framework: str,
+    goal: str,
+    on_event: Optional[Callable[[dict], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
+    **kwargs: Any,
+) -> dict:
+    """在隔离 venv 中执行 runner 脚本, 流式读取 stdout (协议见模块开头说明)。"""
     venv_python = VENV_PYTHON.get(framework)
     runner = RUNNERS_DIR / f"{framework}_runner.py"
     if venv_python is None or not venv_python.is_file():
@@ -52,7 +109,8 @@ def run_in_venv(framework: str, goal: str, **kwargs: Any) -> dict:
         return make_result(framework, goal, status="error",
                            final_answer=f"未找到 runner: {runner}")
 
-    cmd = [str(venv_python), str(runner), "--goal", goal]
+    # -u 关闭子进程缓冲, 保证进度行即时到达
+    cmd = [str(venv_python), "-u", str(runner), "--goal", goal]
     for k, v in kwargs.items():
         if v is None or v is False:
             continue
@@ -61,25 +119,105 @@ def run_in_venv(framework: str, goal: str, **kwargs: Any) -> dict:
         else:
             cmd += [f"--{k.replace('_', '-')}", str(v)]
 
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=1800, cwd=str(PROJECT_ROOT)
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+            cwd=str(PROJECT_ROOT), env=env, bufsize=1,
         )
-    except subprocess.TimeoutExpired:
-        return make_result(framework, goal, status="error", final_answer="runner 执行超时")
     except Exception as e:
         return make_result(framework, goal, status="error", final_answer=f"runner 启动失败: {e!r}")
 
-    out = (proc.stdout or "").strip()
+    lines: list[str] = []                 # 全部输出 (供兜底解析)
+    result: Optional[dict] = None         # 哨兵 / 启发式命中的结果
+    deadline = time.monotonic() + RUN_TIMEOUT
+    q: "queue.Queue[Optional[str]]" = queue.Queue()
+    killed = False
+
+    def _kill() -> None:
+        nonlocal killed
+        if not killed:
+            killed = True
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def _reader() -> None:
+        try:
+            for raw in proc.stdout:
+                q.put(raw)
+        except Exception:
+            pass
+        finally:
+            q.put(None)
+
+    threading.Thread(target=_reader, name=f"runner-{framework}", daemon=True).start()
+
     try:
-        last_line = out.splitlines()[-1] if out else ""
-        data = json.loads(last_line)
-        data.setdefault("framework", framework)
-        data.setdefault("goal", goal)
-        return data
-    except Exception:
-        err = (proc.stderr or "").strip()
-        return make_result(
-            framework, goal, status="error",
-            final_answer=(err or out or "(runner 无输出)")[-2000:],
-        )
+        while True:
+            # 取消 / 超时: 每次循环都检查 (输出密集时 q.get 不会 Empty)
+            if cancel_event is not None and cancel_event.is_set():
+                _kill()
+                return make_result(framework, goal, status="cancelled", final_answer="用户取消")
+            if time.monotonic() > deadline:
+                _kill()
+                return make_result(framework, goal, status="error", final_answer="runner 执行超时")
+            try:
+                raw = q.get(timeout=_POLL_SEC)
+            except queue.Empty:
+                continue
+            if raw is None:               # EOF: 子进程输出完毕
+                break
+            full = _strip_noise(raw)      # 未截断: 结果行可能超长/与输出粘连
+            if not full:
+                continue
+
+            pos = full.find(RESULT_PREFIX)
+            if pos >= 0:                  # 哨兵结果行: 容忍前缀不在行首与尾部噪声
+                obj = _parse_first_json(full[pos + len(RESULT_PREFIX):])
+                if obj is not None:
+                    result = obj
+                    continue              # 结果行不转日志
+            if result is None and full.startswith("{"):
+                obj = _parse_first_json(full)
+                if _looks_like_result(obj):   # 旧协议结果行: 识别为结果, 不作为日志
+                    result = obj
+                    continue
+
+            line = _clean_line(raw)       # 日志行: 截断后转发
+            if not line:
+                continue
+            lines.append(line)
+            if on_event is not None:
+                try:
+                    on_event({"type": "log", "line": line})
+                except BaseException:         # 界面取消等异常: 先杀子进程再透传
+                    _kill()
+                    raise
+
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        # 进程正常结束; 取消若已被置位, 按取消处理 (界面层亦会再兜底)
+        if cancel_event is not None and cancel_event.is_set():
+            return make_result(framework, goal, status="cancelled", final_answer="用户取消")
+    finally:
+        if proc.poll() is None:
+            _kill()
+
+    if result is None:                        # 旧协议兜底: 从末尾向前找结果 JSON 行
+        for line in reversed(lines):
+            if line.startswith("{"):
+                obj = _parse_first_json(line)
+                if isinstance(obj, dict):
+                    result = obj
+                    break
+    if result is None:
+        tail = "\n".join(lines[-20:]) or "(runner 无输出)"
+        return make_result(framework, goal, status="error", final_answer=tail[-2000:])
+    result.setdefault("framework", framework)
+    result.setdefault("goal", goal)
+    return result

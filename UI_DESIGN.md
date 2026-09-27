@@ -1,6 +1,6 @@
 # 智能体交互界面设计（Web · Agent 任务 + Chat 对话）
 
-> 状态：**已实现**（2026-09；双模式；验收脚本 `interface/webui/test_e2e.py`，浏览器端到端复验通过）
+> 状态：**已实现**（2026-09；双模式 + 框架逐步流式；验收脚本 `interface/webui/test_e2e.py` 与 `planner/adapters/test_runner_stream.py`，浏览器端到端复验通过）
 > 代码位置：`interface/webui/`（用户交互层）；后续规划见 `ROADMAP.md`
 > 关联：`framework.md`（总体架构）、`PRINCIPLES.md`（开发原则）、`INTEGRATION.md`（多框架集成）
 
@@ -32,7 +32,7 @@
 
 1. **单 GPU 串行**：模型服务同时仅一个模型占 VRAM → Agent 任务队列串行执行；Chat 请求与任务共享模型服务（服务端有推理锁）。
 2. **框架运行位置差异**：`langgraph / pydantic-ai / smolagents / llamaindex / mcp` 进程内；`crewai / autogen` 隔离 venv 子进程。
-3. **事件能力差异**：LangGraph 支持逐节点流式；其余框架为 basic（开始/结束），P2 补齐。
+3. **事件能力差异**：LangGraph 逐节点流式（`steps`）；`crewai / autogen / mcp / smolagents` 逐行或逐步骤 `log`（`logs`）；`pydantic-ai / llamaindex` 为 basic（仅开始/结束，SDK 无稳定步骤钩子）。
 4. **modelservice 无 CORS**：浏览器不直连，由界面服务服务端代理。
 5. **离线可用**：前端无外网依赖；`--mock` 可用脚本化 LLM 演示 Agent 全流程。
 
@@ -148,7 +148,7 @@ Base：`http://127.0.0.1:8100`
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | GET | `/` | 单页 |
-| GET | `/api/frameworks` | 框架清单（`streaming: steps/basic`） |
+| GET | `/api/frameworks` | 框架清单（`streaming: steps/logs/basic`） |
 | GET | `/api/tools` | 工具清单 |
 | GET | `/api/models` | `{online, models:[{id, profile}], loaded}`（服务端代理） |
 | POST | `/api/chat/stream` | Chat 流式对话（SSE 响应，见 §7.2） |
@@ -210,9 +210,17 @@ LangGraph 路径（`planner/agent.py` 的 `run()` 循环内）：
 | `ask_retry` / `wrap_up` | `log` |
 | 循环结束 | `result`（含 status / final_answer / steps / trace） |
 
-- **取消**：`on_event` 回调内检查取消标志，命中抛 `TaskCancelled`，从 `run()` 循环退出 → 任务置 `cancelled`。
+- **取消（协作式，全框架经界面统一下发）**：`on_event` 回调命中取消标志抛 `TaskCancelled`；`cancel_event`（`threading.Event`）供框架自行检查；工作线程在 `_execute` 返回后以取消标志兜底归为 `cancelled`。
 - **线程协作**：工作线程 `emit()` → `loop.call_soon_threadsafe` → 各 SSE 订阅者 `asyncio.Queue`；事件缓冲上限 2000 条/任务。
-- 其他框架（现状）：`started` → `result / error`（basic）；P2 增加 stdout 行流式（`log`）。
+
+非 LangGraph 框架（2026-09 P2-1 交付，均为向后兼容扩展）：
+
+| 框架 | 进度事件 | 实现要点 | 取消 |
+| :--- | :--- | :--- | :--- |
+| `crewai` `autogen` | stdout 逐行 → `log` | `base.run_in_venv` 流式 `Popen`（`-u` 无缓冲）；结果行为 `__RESULT__{json}` 哨兵（兼容旧的末尾纯 JSON 行，容忍超长/行首粘连/尾部噪声）；runner 内订阅 CrewAI 事件总线 / ReAct 循环插桩 | `cancel_event` 0.5s 轮询或 `on_event` 抛异常 → `kill()` 子进程（实测 ≤0.5s；另有 1800s 超时兜底） |
+| `mcp` | ReAct 每步 → `log` | 适配器 `_log()` 直发 `on_event` | 循环内检查 `cancel_event`；`on_event` 抛异常 |
+| `smolagents` | 每个 ActionStep → `log` | `CodeAgent(step_callbacks=[单参回调])`，取 tool_calls / observations / model_output | `on_event` 抛异常（步骤边界生效；旧版无 `step_callbacks` 时自动回退 basic） |
+| `pydantic-ai` `llamaindex` | 仅开始/结束（basic） | 无稳定步骤钩子 | 无执行中打断点：运行结束后由工作线程统一置 `cancelled` |
 
 ---
 
@@ -245,6 +253,18 @@ interface/webui/
 | `modelservice/*`（代码） | 零改动（无需 CORS） | — |
 | 依赖 | 零新增（SSE 用 starlette `StreamingResponse` 手工格式） | — |
 
+（2026-09 P2-1 框架逐步流式：追加改动）
+
+| 文件 | 改动 | 兼容性 |
+| :--- | :--- | :--- |
+| `planner/adapters/base.py` | 流式 `Popen`：stdout 逐行 → `log`；`__RESULT__` 哨兵宽松解析；取消双路径 → `kill()` | 旧协议结果行兼容 |
+| `planner/adapters/{crewai,autogen}_agent.py` | `on_event / cancel_event` 透传 | 默认 None 行为不变 |
+| `planner/adapters/runners/{crewai,autogen}_runner.py` | 进度输出（事件总线 / 循环插桩）+ 哨兵结果行 | 旧输出仍可解析 |
+| `planner/adapters/{mcp,smolagents}_agent.py` | 逐步 `log` + 协作取消 | 默认 None 行为不变 |
+| `interface/webui/tasks.py` | 透传 `cancel_event=task.cancel_flag` | 取消兜底逻辑不变 |
+| `interface/webui/app.py` | `/api/frameworks` 增加 `streaming` 分级 | 向后兼容（新字段值） |
+| `planner/adapters/test_runner_stream.py` | 新增离线冒烟（协议 / 取消 / 超时，20 项） | 独立运行，不影响其他入口 |
+
 ---
 
 ## 10. 验收与已知限制
@@ -262,8 +282,8 @@ myagent\Scripts\python.exe -m interface.webui.test_e2e
 
 ### 10.2 已知限制
 
-1. 非 langgraph 框架仅 basic 展示（P2 补齐逐步流式）。
-2. 取消为协作式；crewai/autogen 子进程不保证即时终止（P2）。
+1. `pydantic-ai / llamaindex` 仅 basic 展示（其 SDK 无稳定步骤钩子；`crewai / autogen / mcp / smolagents` 已支持 `logs`）。
+2. 取消为协作式：`crewai / autogen` 子进程即时终止（实测 ≤0.5s）；`mcp / smolagents` 在循环 / 步骤边界生效；`pydantic-ai / llamaindex` 无执行中打断点（结束后置为 cancelled）。
 3. 任务历史为内存态；Chat 对话无服务端状态——重启 / 清空即丢（P2 落盘）。
 4. Agent 任务单并发（单卡 VRAM 约束，非缺陷）。
 5. Chat 暂无 Markdown 渲染与续传（P2 增强，见 `ROADMAP.md`）。

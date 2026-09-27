@@ -270,7 +270,7 @@ class TaskManager:
         return run_framework(
             task.framework, task.goal,
             model=task.model, max_steps=task.max_steps,
-            on_event=on_event,
+            on_event=on_event, cancel_event=task.cancel_flag,
         )
 
     def _execute_mock(self, task: Task, on_event) -> dict:

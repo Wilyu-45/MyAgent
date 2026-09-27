@@ -8,6 +8,9 @@ MCP 服务器配置, 无需改 Agent 代码。
 默认连接项目自带的 mcp_server_local.py (FastMCP 包装了本地工具集)。
 配置: 环境变量 MCP_SERVERS_JSON 指向 JSON 文件, 格式:
   [{"name": "local", "command": "python", "args": ["mcp_server_local.py"]}]
+
+步骤进度经 on_event 转为界面 log 事件; 取消走 on_event 抛异常或
+cancel_event 置位 (文本 ReAct 循环, 无子进程可杀)。
 """
 from __future__ import annotations
 
@@ -16,8 +19,9 @@ import json
 import os
 import re
 import sys
+import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from openai import OpenAI
 
@@ -107,21 +111,32 @@ class _McpClient:
 
 
 class _McpAgent:
-    def __init__(self, model: Optional[str], max_steps: int):
+    def __init__(self, model: Optional[str], max_steps: int,
+                 on_event: Optional[Callable[[dict], None]] = None,
+                 cancel_event: Optional[threading.Event] = None):
         self._clients = [_McpClient(c) for c in _load_server_configs()]
         self._model = model or settings.LLM_MODEL
         self._max_steps = max_steps or settings.MAX_STEPS
+        self._on_event = on_event
+        self._cancel_event = cancel_event
         self._llm = OpenAI(
             base_url=settings.LLM_BASE_URL, api_key=settings.LLM_API_KEY, timeout=600
         )
 
+    def _log(self, line: str) -> None:
+        """转发一条进度日志 (取消异常由 on_event 透传, 不在此处捕获)。"""
+        if self._on_event is not None:
+            self._on_event({"type": "log", "line": line})
+
     async def run(self, goal: str) -> dict:
         # 1. 连接所有 MCP 服务器并动态发现工具
+        self._log("连接 MCP 服务器...")
         for c in self._clients:
             await c.connect()
         discovered: list[dict] = []
         for c in self._clients:
             discovered.extend(await c.list_tools())
+        self._log(f"已发现 {len(discovered)} 个 MCP 工具")
 
         tools_block = "\n".join(
             f"- {t['name']} [{t['_server']}]: {t['description']}"
@@ -136,6 +151,10 @@ class _McpAgent:
         ]
         trace: list[dict] = []
         for step in range(self._max_steps):
+            if self._cancel_event is not None and self._cancel_event.is_set():
+                return make_result(FRAMEWORK, goal, status="cancelled",
+                                   final_answer="用户取消", steps=step, trace=trace)
+            self._log(f"第 {step + 1}/{self._max_steps} 步: 请求模型...")
             resp = self._llm.chat.completions.create(
                 model=self._model,
                 messages=messages,
@@ -146,23 +165,32 @@ class _McpAgent:
             trace.append({"type": "model", "content": content})
             obj = parse_llm_json(content)
             if obj is None:
+                self._log("输出不是有效 JSON, 追加纠错消息重试")
                 messages.append({"role": "assistant", "content": content})
                 messages.append({
                     "role": "user",
                     "content": "输出不是有效 JSON, 请只输出 JSON 对象。",
                 })
                 continue
+            if obj.get("thought"):
+                self._log(f"思考: {str(obj['thought'])[:200]}")
             if "final_answer" in obj:
+                self._log("已生成最终答复")
                 return make_result(FRAMEWORK, goal, status="finished",
                                    final_answer=str(obj["final_answer"]),
                                    steps=step, trace=trace)
             action = obj.get("action")
             if action:
-                result = await self._call_discovered(discovered, action, obj.get("action_input") or {})
+                args = obj.get("action_input") or {}
+                self._log(f"调用工具 {action}({json.dumps(args, ensure_ascii=False)[:200]})")
+                result = await self._call_discovered(discovered, action, args)
+                first_line = result.strip().splitlines()[0] if result.strip() else ""
+                self._log(f"工具返回: {first_line[:200]}")
                 trace.append({"type": "tool", "name": action, "content": result[:300]})
                 messages.append({"role": "assistant", "content": content})
                 messages.append({"role": "user", "content": f"工具 {action} 返回:\n{result}"})
             else:
+                self._log("缺少 action/final_answer, 追加纠错消息重试")
                 messages.append({"role": "assistant", "content": content})
                 messages.append({"role": "user", "content": "缺少 action/final_answer, 请重试。"})
 
@@ -188,13 +216,18 @@ def run(
     model: Optional[str] = None,
     max_steps: Optional[int] = None,
     verbose: bool = False,
+    on_event: Optional[Callable[[dict], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
     **kwargs,
 ) -> dict:
-    agent = _McpAgent(model, max_steps)
+    agent = _McpAgent(model, max_steps, on_event=on_event, cancel_event=cancel_event)
     try:
         result = asyncio.run(agent.run(goal))
     except Exception as e:
-        result = make_result(FRAMEWORK, goal, status="error", final_answer=f"{e!r}")
+        if cancel_event is not None and cancel_event.is_set():
+            result = make_result(FRAMEWORK, goal, status="cancelled", final_answer="用户取消")
+        else:
+            result = make_result(FRAMEWORK, goal, status="error", final_answer=f"{e!r}")
     finally:
         asyncio.run(agent.close())
     return result

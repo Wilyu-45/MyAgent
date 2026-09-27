@@ -3,9 +3,12 @@
 > 现状：Web 交互界面（Agent 任务 + Chat 对话双模式）已交付。
 > 完成某项时：同步更新本文件与 `UI_DESIGN.md`。
 
+## 已完成
+
+- **非 langgraph 框架逐活动流式**（2026-09）：`crewai / autogen` 子进程 stdout 逐行流式（`log` 事件）+ 即时终止（`cancel_event` 0.5s 轮询 / `on_event` 异常 → `kill()`，实测 ≤0.5s）；`mcp / smolagents` 进程内逐步骤 `log`；`/api/frameworks` 增加 `streaming` 分级（steps/logs/basic）。验收：`planner/adapters/test_runner_stream.py`（20 项）+ `interface/webui/test_e2e.py`（29 项）。
+
 ## P2（近期：界面设计内的补齐）
 
-- **非 langgraph 框架逐活动流式**：runner stdout 行 → `log` 事件；`Popen` 支持即时终止 crewai/autogen 子进程。
 - **任务历史落盘**：`memory/ui_tasks.json`（重启不丢）。
 - **操作审批卡片**：高风险操作（对接沙箱层）在界面弹窗确认后执行。
 - **多任务并行开关**：`--workers N`（默认仍为 1，遵守单卡约束）。

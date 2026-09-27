@@ -3,7 +3,8 @@ CrewAI runner (在 myagent_crewai 隔离 venv 中运行)
 ==================================================
 用法: myagent_crewai\\Scripts\\python.exe planner/adapters/runners/crewai_runner.py \
           --goal "..." [--model X] [--max-steps N] [--verbose]
-stdout 最后一行输出 JSON 结果。
+stdout: [crewai] 进度行 (可选) + 最后一行 "__RESULT__{json}" 哨兵结果
+        (base.run_in_venv 将进度行实时转界面 log, 哨兵行解析为结果)。
 """
 from __future__ import annotations
 
@@ -35,6 +36,66 @@ _policy = SandboxPolicy([PROJECT_ROOT], allow_shell=True)
 
 def _check_path(p: str) -> Path:
     return _policy.check_path(p)
+
+
+# ---------- 进度输出 (base.run_in_venv 实时转为界面 log 事件) ----------
+RESULT_PREFIX = "__RESULT__"  # 与 planner/adapters/base.py 的 RESULT_PREFIX 保持一致
+
+
+def _emit(line: str) -> None:
+    print(f"[crewai] {line}", flush=True)
+
+
+def _setup_progress() -> None:
+    """订阅 crewai 事件总线, 将步骤/工具活动打印为进度行。
+
+    仅在事件 API 可用时生效; 任何失败都静默跳过 (不影响 Crew 执行)。
+    """
+    try:
+        from crewai.events.event_bus import crewai_event_bus as bus
+        from crewai.events.types.agent_events import AgentExecutionStartedEvent
+        from crewai.events.types.tool_usage_events import (
+            ToolUsageErrorEvent,
+            ToolUsageFinishedEvent,
+            ToolUsageStartedEvent,
+        )
+    except Exception:
+        return
+
+    def _safe(fn):
+        def wrapper(*args, **kwargs):
+            try:
+                fn(*args, **kwargs)
+            except Exception:
+                pass
+        return wrapper
+
+    def _on_agent_start(_source, event):
+        role = getattr(event, "agent_role", "") or getattr(
+            getattr(event, "agent", None), "role", "")
+        _emit(f"步骤开始: {role or 'agent'} 开始执行任务")
+
+    def _on_tool_start(_source, event):
+        args = str(getattr(event, "tool_args", "") or "")
+        _emit(f"调用工具 {getattr(event, 'tool_name', '?')}({args[:160]})")
+
+    def _on_tool_done(_source, event):
+        _emit(f"工具完成: {getattr(event, 'tool_name', '?')}")
+
+    def _on_tool_error(_source, event):
+        msg = str(getattr(event, "error", "") or getattr(event, "message", "") or "")
+        _emit(f"工具失败: {getattr(event, 'tool_name', '?')} {msg[:160]}".rstrip())
+
+    for ev_cls, fn in (
+        (AgentExecutionStartedEvent, _on_agent_start),
+        (ToolUsageStartedEvent, _on_tool_start),
+        (ToolUsageFinishedEvent, _on_tool_done),
+        (ToolUsageErrorEvent, _on_tool_error),
+    ):
+        try:
+            bus.register_handler(ev_cls, _safe(fn))
+        except Exception:
+            pass
 
 
 @tool
@@ -123,25 +184,28 @@ def main() -> int:
             agent=agent,
         )
         crew = Crew(agents=[agent], tasks=[task], process=Process.sequential)
+        _setup_progress()
+        _emit(f"开始执行 Crew (max_iter={args.max_steps or 8})")
         result = crew.kickoff()
-        print(json.dumps({
+        print(RESULT_PREFIX + json.dumps({
             "framework": "crewai",
             "goal": args.goal,
             "status": "finished",
             "final_answer": str(result),
             "steps": 0,
             "trace": [],
-        }, ensure_ascii=False))
+        }, ensure_ascii=False), flush=True)
         return 0
     except Exception as e:
-        print(json.dumps({
+        _emit(f"执行失败: {type(e).__name__}: {e}")
+        print(RESULT_PREFIX + json.dumps({
             "framework": "crewai",
             "goal": args.goal,
             "status": "error",
             "final_answer": f"{type(e).__name__}: {e}",
             "steps": 0,
             "trace": [],
-        }, ensure_ascii=False))
+        }, ensure_ascii=False), flush=True)
         return 1
 
 

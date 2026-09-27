@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import importlib
+import threading
 from typing import Any, Callable, Optional
 
 from .manifest import load_manifest
@@ -39,13 +40,17 @@ def run_framework(
     max_steps: Optional[int] = None,
     verbose: bool = False,
     on_event: Optional[Callable[[dict], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
     **kwargs: Any,
 ) -> dict:
     """统一入口: 调用任意框架的 run(), 返回 {framework, goal, status, final_answer, steps, trace}。
 
-    on_event: 可选事件回调 (界面层使用)。langgraph 支持逐步骤事件; 其余
-    框架 P1 阶段仅转发忽略 (由调用方在外层发 started/result)。
+    on_event: 可选事件回调 (界面层使用)。事件粒度: langgraph 逐节点
+        (thought/tool/...); crewai/autogen 子进程 stdout 逐行 (log);
+        mcp/smolagents 逐步骤 (log)。
+    cancel_event: 可选取消信号 (threading.Event)。子进程框架 (crewai/
+        autogen) 据此即时终止 runner; 其余框架经 on_event 抛异常协作取消。
     """
     mod = get_adapter(name)
     return mod.run(goal=goal, model=model, max_steps=max_steps, verbose=verbose,
-                   on_event=on_event, **kwargs)
+                   on_event=on_event, cancel_event=cancel_event, **kwargs)

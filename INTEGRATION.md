@@ -21,6 +21,8 @@
 > 因此拆到独立 venv，通过 `planner/adapters/runners/*_runner.py` 子进程调用
 > （`planner/adapters/base.py` 的 `run_in_venv()` 封装）。llama-index 把主 venv
 > 的 openai 降到 2.54.0，与 langgraph 1.6 / pydantic-ai 2.32 兼容，无需隔离。
+> 子进程 stdout 逐行实时读取并转发为界面 `log` 事件（结果行 `__RESULT__{json}`
+> 哨兵）；界面取消可在 0.5s 内 `kill()` 子进程。
 
 ## 2. 目录结构
 
@@ -30,7 +32,7 @@ D:\agent\
 │   ├── agent.py / graph.py / state.py / prompts.py / llm.py / tools.py   LangGraph 编排 (原集成)
 │   └── adapters\                     ★ 本次新增: 多框架统一适配层
 │       ├── __init__.py               框架注册表 + run_framework() 统一入口
-│       ├── base.py                   结果结构 + 隔离 venv 子进程执行
+│       ├── base.py                   结果结构 + 隔离 venv 流式执行 (哨兵协议 / 即时终止)
 │       ├── tool_wrappers.py          类型化工具 (签名+Google docstring)
 │       ├── langgraph_agent.py        LangGraph 适配器
 │       ├── pydantic_ai_agent.py      Pydantic AI 适配器 (结构化输出+自动回退)
@@ -39,6 +41,7 @@ D:\agent\
 │       ├── mcp_agent.py              MCP 客户端适配器 (动态发现工具)
 │       ├── crewai_agent.py           子进程 -> myagent_crewai
 │       ├── autogen_agent.py          子进程 -> myagent_autogen
+│       ├── test_runner_stream.py     runner 流式/取消离线冒烟
 │       └── runners\
 │           ├── crewai_runner.py      CrewAI runner (隔离 venv 内运行)
 │           └── autogen_runner.py     AutoGen runner (隔离 venv 内运行)
@@ -124,15 +127,19 @@ for fw in ["langgraph", "pydantic-ai", "smolagents", "llamaindex", "mcp", "crewa
 - **Pydantic AI**：`OpenAIChatModel + OpenAIProvider(base_url)`；工具为类型化函数；
   结构化输出 `output_type=Answer`，本地模型 JSON 不稳时自动回退纯文本。
 - **Smolagents**：`CodeAgent + OpenAIServerModel(api_base)`；工具需 `@tool` 包装
-  （Google 风格 docstring）；`max_steps` 是 `run()` 参数。
+  （Google 风格 docstring）；`max_steps` 是 `run()` 参数；界面模式下注册
+  `step_callbacks` 输出每步 `log`（旧版无该参数时自动回退）。
 - **LlamaIndex**：`OpenAILike(api_base)` + `AgentWorkflow.from_tools_or_functions`
   （注意 0.14 无 `from_tools`，`run()` 返回可 await 的 `WorkflowHandler`）。
 - **MCP**：`mcp` SDK stdio 客户端动态发现工具 + 文本 ReAct；服务器配置见
-  `MCP_SERVERS_JSON` 环境变量，默认连接 `mcp_server_local.py`。
+  `MCP_SERVERS_JSON` 环境变量，默认连接 `mcp_server_local.py`；步骤进度经
+  `on_event` 转为界面 `log`。
 - **CrewAI**：`LLM(model="openai/<id>", base_url=...)`；原生工具调用经服务端桥接；
-  `CREWAI_STORAGE_DIR` 可指定数据目录。
+  `CREWAI_STORAGE_DIR` 可指定数据目录；执行中经 `crewai.events` 事件总线订阅
+  代理/工具活动, runner 输出进度行。
 - **AutoGen**：`OpenAIChatCompletionClient`（`model_info` 需含 `family`）；
-  本地模型不支持原生函数调用，用文本 ReAct 手动循环（AssistantAgent.on_messages）。
+  本地模型不支持原生函数调用，用文本 ReAct 手动循环（AssistantAgent.on_messages），
+  循环逐步输出进度行。
 
 ## 7. 验证结果（2026-08 实测）
 
@@ -145,6 +152,9 @@ for fw in ["langgraph", "pydantic-ai", "smolagents", "llamaindex", "mcp", "crewa
 | mcp | ✅ 服务器可用 | 进程内 8 工具发现+调用通过；stdio 全链路需在无沙箱环境运行 |
 | crewai | ✅ finished | 原生工具调用（shell）并汇总 23 项 |
 | autogen | ✅ finished | 1 步工具调用并汇总 |
+
+2026-09 P2-1 复验：crewai / autogen / mcp / smolagents 逐活动流式与运行中取消
+（≤0.5s；smolagents 在步骤边界）全部通过；离线冒烟 20 项、界面 e2e 29 项全绿。
 
 ## 8. 框架管理体系（升级 / 新增 / 验证）
 
@@ -190,5 +200,7 @@ python -m planner.frameworks add openai-agents --packages openai-agents --venv n
 - 本地 9B 模型偶尔计数不准、输出含 `<think>` 残留，属模型质量问题；换更强模型可改善。
 - MCP stdio 子进程通信在受限沙箱中不可用（用户正常环境无此限制）。
 - 原生函数调用依赖服务端桥接解析旧版标记；升级 llama-cpp-python 后可直接移除桥接。
+- `pydantic-ai / llamaindex` 无稳定逐步钩子，界面仅显示开始/结束；执行中取消
+  不打断运行（结束后由界面统一置为 cancelled）。
 - 可扩展：更多 MCP 服务器（`MCP_SERVERS_JSON`）、OpenHands 作为独立服务调用、
   多 Agent 团队编排（CrewAI/AutoGen 已就绪）。

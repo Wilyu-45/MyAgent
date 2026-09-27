@@ -116,6 +116,15 @@ def create_app(mock: bool = False) -> FastAPI:
         return FileResponse(STATIC_DIR / "index.html")
 
     # ==================== 框架清单 ====================
+    # 事件能力: steps=结构化步骤 / logs=逐行或逐步骤 log / basic=仅开始与结束
+    streaming_levels = {
+        "langgraph": "steps",
+        "crewai": "logs",
+        "autogen": "logs",
+        "mcp": "logs",
+        "smolagents": "logs",
+    }
+
     @app.get("/api/frameworks")
     async def api_frameworks():
         frameworks = []
@@ -124,7 +133,7 @@ def create_app(mock: bool = False) -> FastAPI:
                 "name": name,
                 "venv": entry.get("venv", "myagent"),
                 "available": resolve_python(entry).is_file(),
-                "streaming": "steps" if name == "langgraph" else "basic",
+                "streaming": streaming_levels.get(name, "basic"),
                 "notes": entry.get("notes", ""),
             })
         return {"frameworks": frameworks}

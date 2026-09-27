@@ -38,7 +38,7 @@
 
 ## 6. 测试与验收
 
-- 能离线验证的必须离线可验证（如 `--mock`）；冒烟脚本随模块放置（`interface/webui/test_e2e.py`、`modelservice/test_e2e.py`）。
+- 能离线验证的必须离线可验证（如 `--mock`）；冒烟脚本随模块放置（`interface/webui/test_e2e.py`、`modelservice/test_e2e.py`、`planner/adapters/test_runner_stream.py`）。
 - 验收不留临时产物（截图、临时脚本等用后即删）。
 
 ## 7. 关键决策记录
@@ -48,6 +48,7 @@
 - 事件信封 `{seq, ts, task_id, type}` + `after_seq` 续传：断线不丢不重。
 - Chat 对话**无服务端状态**：历史保存在前端内存，不落库。
 - 模型用显式 `profile` 字段区分 agent/chat 配置，界面按当前模式过滤模型。
+- 子进程框架（crewai/autogen）进度流式：runner stdout 行 → `log` 事件，结果行用 `__RESULT__` 哨兵；取消走 `cancel_event`（杀子进程）与 `on_event` 抛异常双路径。结果行解析必须在**未截断**的去噪原始行上进行（容忍行首粘连/超长/尾部噪声），截断只用于日志转发——先截断再解析曾导致长结果行解析失败。
 
 ## 8. AI 协作约定
 

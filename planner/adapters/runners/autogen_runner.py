@@ -7,7 +7,8 @@ AutoGen runner (在 myagent_autogen 隔离 venv 中运行)
 
 用法: myagent_autogen\\Scripts\\python.exe planner/adapters/runners/autogen_runner.py \
           --goal "..." [--model X] [--max-steps N] [--verbose]
-stdout 最后一行输出 JSON 结果。
+stdout: [autogen] 进度行 (可选) + 最后一行 "__RESULT__{json}" 哨兵结果
+        (base.run_in_venv 将进度行实时转界面 log, 哨兵行解析为结果)。
 """
 from __future__ import annotations
 
@@ -38,6 +39,14 @@ API_KEY = os.getenv("AGENT_LLM_API_KEY", "local")
 
 _memory = Memory()
 _policy = SandboxPolicy([PROJECT_ROOT], allow_shell=True)
+
+# ---------- 进度输出 (base.run_in_venv 实时转为界面 log 事件) ----------
+RESULT_PREFIX = "__RESULT__"  # 与 planner/adapters/base.py 的 RESULT_PREFIX 保持一致
+
+
+def _emit(line: str) -> None:
+    print(f"[autogen] {line}", flush=True)
+
 
 SYSTEM_PROMPT = """你是一个运行在 Windows 上的电脑自动化助手。你的任务目标: {goal}
 可用工具:
@@ -137,22 +146,33 @@ async def _run(goal: str, model: str, max_steps: int) -> dict:
     trace: list[dict] = []
     final_answer = ""
     steps = 0
-    for _ in range(max_steps):
+    for _step in range(max_steps):
+        _emit(f"第 {_step + 1}/{max_steps} 步: 请求模型...")
         resp = await assistant.on_messages(messages, CancellationToken())
         text = getattr(resp.chat_message, "content", "") or ""
         trace.append({"type": "message", "content": text[:300]})
         obj = _parse_json(text)
         if obj is None:
+            _emit("输出无法解析为 JSON, 追加纠错消息重试")
             messages.append(TextMessage(content="输出不是有效 JSON, 请只输出 JSON 对象。", source="user"))
             continue
+        thought = str(obj.get("thought") or "").strip()
+        if thought:
+            _emit(f"思考: {thought[:180]}")
         if "final_answer" in obj:
             final_answer = str(obj["final_answer"])
+            _emit("已生成最终答复")
             break
         if "action" in obj:
-            result = _call_tool(str(obj["action"]), obj.get("action_input") or {})
+            action = str(obj["action"])
+            args = str(obj.get("action_input") or {})
+            _emit(f"调用工具 {action}({args[:160]})")
+            result = _call_tool(action, obj.get("action_input") or {})
             steps += 1
+            first = next((l for l in str(result).splitlines() if l.strip()), "(空)")
+            _emit(f"工具返回: {first[:160]}")
             messages.append(TextMessage(
-                content=f"工具 {obj['action']} 返回:\n{result}", source="user"))
+                content=f"工具 {action} 返回:\n{result}", source="user"))
         else:
             messages.append(TextMessage(content="缺少 action/final_answer, 请重试。", source="user"))
 
@@ -184,17 +204,18 @@ def main() -> int:
             args.model or DEFAULT_MODEL,
             args.max_steps or 8,
         ))
-        print(json.dumps(result, ensure_ascii=False))
+        print(RESULT_PREFIX + json.dumps(result, ensure_ascii=False), flush=True)
         return 0
     except Exception as e:
-        print(json.dumps({
+        _emit(f"执行失败: {type(e).__name__}: {e}")
+        print(RESULT_PREFIX + json.dumps({
             "framework": "autogen",
             "goal": args.goal,
             "status": "error",
             "final_answer": f"{type(e).__name__}: {e}",
             "steps": 0,
             "trace": [],
-        }, ensure_ascii=False))
+        }, ensure_ascii=False), flush=True)
         return 1
 
 

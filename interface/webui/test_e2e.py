@@ -6,6 +6,8 @@ Web 交互界面冒烟测试 (对应 UI_DESIGN.md 验收用例)
 
 运行:
     myagent\\Scripts\\python.exe -m interface.webui.test_e2e
+    # 也可通过环境变量指向其他端口/实例 (如 mock 服务跑在 8101):
+    $env:WEBUI_BASE="http://127.0.0.1:8101"; myagent\\Scripts\\python.exe -m interface.webui.test_e2e
 
 说明: modelservice 在线时额外验证 profile 字段与 Chat 真实流式对话;
 离线时验证 Agent 全流程与 Chat 的错误兜底, 用例自动降级不失败。
@@ -13,12 +15,13 @@ Web 交互界面冒烟测试 (对应 UI_DESIGN.md 验收用例)
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
 
-BASE = "http://127.0.0.1:8100"
+BASE = os.getenv("WEBUI_BASE", "http://127.0.0.1:8100")
 
 
 def _req(path: str, body: dict | None = None, method: str = "GET", timeout: float = 10.0):
@@ -81,9 +84,11 @@ def main() -> None:
     check("GET /health", s == 200)
     s, fw = _req("/api/frameworks")
     names = [f["name"] for f in fw.get("frameworks", [])]
+    levels = {f["name"]: f.get("streaming") for f in fw.get("frameworks", [])}
     check("GET /api/frameworks", s == 200 and "langgraph" in names,
-          f"{len(names)} 个框架, langgraph.streaming=" +
-          next((f["streaming"] for f in fw["frameworks"] if f["name"] == "langgraph"), "?"))
+          f"{len(names)} 个框架, streaming={levels}")
+    check("事件能力映射 (steps/logs)",
+          levels.get("langgraph") == "steps" and levels.get("crewai") == "logs", str(levels))
     s, tools = _req("/api/tools")
     check("GET /api/tools", s == 200 and tools.get("count", 0) > 0, f"{tools.get('count')} 个工具")
     s, models = _req("/api/models")
