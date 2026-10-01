@@ -42,6 +42,7 @@ def run_framework(
     on_event: Optional[Callable[[dict], None]] = None,
     cancel_event: Optional[threading.Event] = None,
     approval: Optional[Callable[[dict], bool]] = None,
+    images: Optional[list[str]] = None,
     **kwargs: Any,
 ) -> dict:
     """统一入口: 调用任意框架的 run(), 返回 {framework, goal, status, final_answer, steps, trace}。
@@ -55,8 +56,12 @@ def run_framework(
         以 {"tool", "detail", "danger_level"} 请求确认, 返回 True 放行 / False 拒绝;
         默认 None 时行为不变 (直接放行)。进程内框架经 ToolRegistry 生效,
         crewai/autogen 经子进程 __APPROVAL__ 协议, 对调用方接口一致。
+    images: 可选图片列表 (data URL, 多模态输入)。langgraph (多模态 user 消息)、
+        mcp (content parts)、smolagents (PIL images)、pydantic-ai (BinaryContent)、
+        llamaindex (ImageBlock) 直接消费; autogen 经子进程临时文件通道
+        (AGENT_IMAGES_JSON); crewai 不支持 (显式报错)。
     """
     mod = get_adapter(name)
     return mod.run(goal=goal, model=model, max_steps=max_steps, verbose=verbose,
                    on_event=on_event, cancel_event=cancel_event,
-                   approval=approval, **kwargs)
+                   approval=approval, images=images, **kwargs)

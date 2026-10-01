@@ -3,41 +3,51 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agent 交互界面</title>
+<title data-i18n="title.doc">Agent 交互界面</title>
 <link rel="stylesheet" href="/static/style.css">
+<script src="/static/i18n.js"></script>
+<script src="/static/theme.js"></script>
 </head>
 <body>
 
 <header id="topbar">
   <div class="brand">🤖 Agent</div>
   <div class="mode-switch" id="mode-switch" role="tablist" aria-label="交互模式">
-    <button id="mode-agent" class="mode-btn active" data-mode="agent"
-            title="任务规划: 多步执行 + 工具调用 (agent 配置模型)">Agent 任务</button>
-    <button id="mode-chat" class="mode-btn" data-mode="chat"
-            title="对话: 直连本地模型 (chat 配置模型)">Chat 对话</button>
+    <button id="mode-agent" class="mode-btn active" data-mode="agent" data-i18n="mode.agent"
+            data-i18n-title="title.mode.agent" title="任务规划: 多步执行 + 工具调用 (agent 配置模型)">Agent 任务</button>
+    <button id="mode-chat" class="mode-btn" data-mode="chat" data-i18n="mode.chat"
+            data-i18n-title="title.mode.chat" title="对话: 直连本地模型 (chat 配置模型)">Chat 对话</button>
   </div>
   <div class="status" id="ms-status">
-    <span class="dot" id="ms-dot"></span><span id="ms-text">连接中…</span>
+    <span class="dot" id="ms-dot"></span><span id="ms-text" data-i18n="ms.connecting">连接中…</span>
   </div>
-  <label class="agent-only">框架 <select id="sel-framework" title="Agent 框架"></select></label>
-  <label>模型 <select id="sel-model" title="本地模型 (agent/chat 配置来自 models.json)"></select></label>
-  <label class="agent-only">步数 <input id="inp-steps" type="number" value="8" min="1" max="50" title="最大步数"></label>
-  <button id="btn-sidebar" class="ghost" title="侧栏">☰</button>
+  <label class="agent-only"><span data-i18n="label.framework">框架</span> <select id="sel-framework" title="Agent 框架"></select></label>
+  <label><span data-i18n="label.model">模型</span> <select id="sel-model" title="本地模型 (agent/chat 配置来自 models.json)"></select></label>
+  <label class="agent-only"><span data-i18n="label.steps">步数</span> <input id="inp-steps" type="number" value="8" min="1" max="50" title="最大步数"></label>
+  <button id="btn-theme" class="ghost" data-i18n-title="title.theme" title="切换深色/浅色主题">🌙</button>
+  <button id="btn-lang" class="ghost" data-i18n-title="title.lang" title="切换语言 / Switch language">EN</button>
+  <button id="btn-sidebar" class="ghost" data-i18n-title="title.sidebar" title="侧栏">☰</button>
 </header>
 
 <main>
   <section id="taskview">
     <div id="messages">
       <div class="empty-hint" id="empty-hint">
-        输入任务目标开始，例如：<code>列出 D:\agent 目录下的文件</code>
+        <span data-i18n="hint.agent.pre">输入任务目标开始，例如：</span><code>列出 D:\agent 目录下的文件</code>
       </div>
     </div>
     <div id="composer" class="composer">
-      <textarea id="inp-goal" rows="2"
-        placeholder="任务目标…（Enter 发送 / Shift+Enter 换行）"></textarea>
+      <div class="composer-main">
+        <textarea id="inp-goal" rows="2" data-i18n-ph="ph.goal"
+          placeholder="任务目标…（Enter 发送 / Shift+Enter 换行 / 可粘贴或拖入图片）"></textarea>
+        <div class="img-strip" id="goal-img-strip" hidden></div>
+      </div>
       <div class="composer-actions">
-        <button id="btn-send" class="primary">发送</button>
-        <button id="btn-cancel" class="danger" hidden>■ 取消</button>
+        <button id="btn-goal-img" class="ghost" title="添加图片 (png/jpg/gif/webp, 最多 4 张, 可粘贴/拖入)">📎</button>
+        <button id="btn-goal-shot" class="ghost" title="屏幕截图 (选择窗口/屏幕后作为图片附加)">📷</button>
+        <input id="file-goal" type="file" accept="image/png,image/jpeg,image/jpg,image/gif,image/webp" multiple hidden>
+        <button id="btn-send" class="primary" data-i18n="btn.send">发送</button>
+        <button id="btn-cancel" class="danger" hidden data-i18n="btn.cancel">■ 取消</button>
       </div>
     </div>
   </section>
@@ -45,32 +55,85 @@
   <section id="chatview" hidden>
     <div id="chat-messages">
       <div class="empty-hint" id="chat-hint">
-        与本地模型直接对话（使用 <code>chat</code> 配置模型，不经过 Agent 编排）
+        <span data-i18n="hint.chat.pre">与本地模型直接对话（使用 </span><code>chat</code><span data-i18n="hint.chat.post"> 配置模型，不经过 Agent 编排）</span>
       </div>
     </div>
     <div id="chat-composer" class="composer">
-      <textarea id="inp-chat" rows="2"
-        placeholder="输入消息…（Enter 发送 / Shift+Enter 换行）"></textarea>
+      <div class="composer-main">
+        <textarea id="inp-chat" rows="2" data-i18n-ph="ph.chat"
+          placeholder="输入消息…（Enter 发送 / Shift+Enter 换行 / 可粘贴或拖入图片）"></textarea>
+        <div class="img-strip" id="chat-img-strip" hidden></div>
+      </div>
       <div class="composer-actions">
-        <button id="btn-chat-clear" title="清空当前对话 (仅前端保存)">清空对话</button>
-        <button id="btn-chat-send" class="primary">发送</button>
-        <button id="btn-chat-stop" class="danger" hidden>■ 停止</button>
+        <button id="btn-chat-img" class="ghost" title="添加图片 (png/jpg/gif/webp, 最多 4 张, 可粘贴/拖入)">📎</button>
+        <button id="btn-chat-shot" class="ghost" title="屏幕截图 (选择窗口/屏幕后作为图片附加)">📷</button>
+        <input id="file-chat" type="file" accept="image/png,image/jpeg,image/jpg,image/gif,image/webp" multiple hidden>
+        <button id="btn-chat-clear" data-i18n="btn.clear" title="清空当前对话 (仅前端保存)">清空对话</button>
+        <button id="btn-chat-send" class="primary" data-i18n="btn.send">发送</button>
+        <button id="btn-chat-stop" class="danger" hidden data-i18n="btn.stop">■ 停止</button>
       </div>
     </div>
   </section>
 
   <aside id="sidebar">
-    <h3>任务历史</h3>
+    <h3 data-i18n="sec.history">任务历史</h3>
     <div id="history" class="list"></div>
-    <h3>可用工具</h3>
+    <h3 data-i18n="sec.schedules">定时任务</h3>
+    <div id="schedules" class="list"></div>
+    <div class="sched-form">
+      <input id="inp-sched-goal" data-i18n-ph="ph.sched.goal" placeholder="定时任务目标…" maxlength="2000">
+      <div class="sched-row">
+        <select id="sel-sched-kind" title="计划类型">
+          <option value="interval" data-i18n="opt.interval">每 N 分钟</option>
+          <option value="daily" data-i18n="opt.daily">每日 HH:MM</option>
+          <option value="cron" data-i18n="opt.cron">cron 表达式</option>
+        </select>
+        <input id="inp-sched-value" placeholder="30" title="按类型填: 分钟数 / HH:MM / 分 时 日 月 周">
+        <button id="btn-sched-add" class="mini" data-i18n="btn.add" title="创建定时任务 (到点自动提交 Agent 任务)">添加</button>
+      </div>
+    </div>
+    <h3 data-i18n="sec.memory">长期记忆</h3>
+    <div class="sched-form">
+      <div class="sched-row">
+        <input id="inp-mem-key" data-i18n-ph="ph.mem.key" placeholder="分类" maxlength="64" title="记忆分类名 (如 偏好/项目/常用路径)">
+        <input id="inp-mem-value" data-i18n-ph="ph.mem.value" placeholder="要记录的内容…" maxlength="2000">
+        <button id="btn-mem-add" class="mini" data-i18n="btn.add" title="写入长期记忆 (Agent 任务与 Chat 会自动参考)">添加</button>
+      </div>
+      <input id="inp-mem-search" data-i18n-ph="ph.mem.search" placeholder="搜索记忆 (按 Enter, 清空恢复全部)…" maxlength="200">
+    </div>
+    <div id="memory" class="list"></div>
+    <h3 data-i18n="sec.kb">知识库</h3>
+    <div class="sched-form">
+      <div class="sched-row">
+        <input id="file-kb" type="file" accept=".txt,.md,.pdf" multiple hidden>
+        <button id="btn-kb-add" class="mini" data-i18n="btn.import" title="导入 txt/md/pdf 文档 (任务可用 search_knowledge 检索)">导入文档</button>
+      </div>
+      <input id="inp-kb-search" data-i18n-ph="ph.kb.search" placeholder="搜索知识库 (Enter, 清空恢复列表)…" maxlength="200">
+    </div>
+    <div id="kb" class="list"></div>
+    <h3 data-i18n="sec.mcp">MCP / 插件</h3>
+    <div class="sched-form">
+      <div class="sched-row">
+        <input id="inp-mcp-name" data-i18n-ph="ph.mcp.name" placeholder="名称" maxlength="64">
+        <input id="inp-mcp-cmd" data-i18n-ph="ph.mcp.cmd" placeholder="命令 (如 npx / python)" maxlength="500">
+      </div>
+      <div class="sched-row">
+        <input id="inp-mcp-args" data-i18n-ph="ph.mcp.args" placeholder="参数 (空格分隔, 可选)" maxlength="1000">
+        <button id="btn-mcp-add" class="mini" data-i18n="btn.add" title="添加自定义 stdio MCP 服务器 (mcp 框架任务自动加载)">添加</button>
+      </div>
+    </div>
+    <div id="mcp" class="list"></div>
+    <div id="mcp-catalog" class="list"></div>
+    <h3 data-i18n="sec.tools">可用工具</h3>
     <div id="tools" class="list"></div>
-    <h3>环境</h3>
+    <h3 data-i18n="sec.env">环境</h3>
     <div id="env" class="list"></div>
   </aside>
 </main>
 
 <div id="toast"></div>
 <script src="/static/md.js"></script>
+<script src="/static/multimodal.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

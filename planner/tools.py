@@ -238,8 +238,32 @@ def default_registry(
             },
             func=lambda a: memory.recall(str(a.get("key", "default"))),
         ),
+        ToolSpec(
+            name="search_knowledge",
+            description="检索本地知识库 (已导入的文档), 返回最相关的原文片段",
+            parameters={
+                "query": {"type": "string", "description": "检索关键词或问题"},
+                "top_k": {"type": "integer", "description": "返回片段数, 默认 4"},
+            },
+            func=lambda a: _search_knowledge(a),
+        ),
     ]
     return ToolRegistry(specs)
+
+
+def _search_knowledge(args: dict) -> str:
+    """知识库检索工具: 空库/无命中给出可读提示 (模型据此改用其他方式)。"""
+    from planner.knowledge import KnowledgeBase
+
+    kb = KnowledgeBase()
+    hits = kb.search(str(args.get("query", "")), int(args.get("top_k", 4) or 4))
+    if not hits:
+        return "(知识库无相关内容; 可提示用户在侧栏「知识库」导入文档)"
+    lines = [f"共 {len(hits)} 条相关片段:"]
+    for i, h in enumerate(hits, 1):
+        lines.append(f"[{i}] 文档《{h['doc_name']}》 (相关度 {h['score']}):")
+        lines.append(h["text"])
+    return "\n".join(lines)
 
 
 def _shell_guarded(args: dict, policy: SandboxPolicy,

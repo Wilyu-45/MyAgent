@@ -12,7 +12,9 @@ from __future__ import annotations
 import uuid
 from typing import Any, Callable, Optional
 
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+
+from memory import Memory
 
 from .config import settings
 from .graph import build_agent
@@ -34,9 +36,12 @@ class Agent:
         verbose: bool = False,
         approval: Optional[Callable[[dict], bool]] = None,
         checkpointer: Optional[Any] = None,
+        memory: Optional[Memory] = None,
     ):
         self.llm = llm if llm is not None else build_llm(model=model)
-        self.registry = registry or default_registry(approval=approval)
+        # memory: 记忆实例 (注入 + append/recall 工具共用同一份); 默认按配置文件加载
+        self.memory = memory if memory is not None else Memory(settings.MEMORY_FILE)
+        self.registry = registry or default_registry(approval=approval, memory=self.memory)
         self.max_steps = max_steps or settings.MAX_STEPS
         self.verbose = verbose
         # checkpointer: 外部共享检查点 (多轮续跑); 默认每个实例独立 MemorySaver
@@ -48,6 +53,7 @@ class Agent:
         goal: str,
         thread_id: Optional[str] = None,
         on_event: Optional[Callable[[dict], None]] = None,
+        images: Optional[list[str]] = None,
     ) -> dict:
         """运行一个任务目标, 返回结果摘要。
 
@@ -56,6 +62,11 @@ class Agent:
             thread_id: LangGraph 检查点线程 id (同一 id 可续跑/回溯)
             on_event: 可选事件回调 (界面层使用); 按图节点派生 thought/tool/
                 tool_result/log 事件。回调内抛异常可中断执行 (协作式取消)。
+            images: 可选图片列表 (data URL, 多模态输入, 需模型支持 mmproj)。
+                非 None 时构造含 image_url content parts 的多模态 user 消息
+                加入本轮对话 (续跑时追加为最新消息)。
+            记忆注入: self.memory 有内容时, 依 goal 检索相关长期记忆摘录
+                自动并入本轮首条 user 消息 (无记忆时行为不变)。
 
         Returns:
             {thread_id, goal, status, final_answer, steps, messages, trace}
@@ -74,6 +85,24 @@ class Agent:
             "retries_left": 2,
             "wrap_up_done": False,   # 每轮重置, 保证续跑时收尾提醒可用
         }
+        if images:
+            parts: list[dict] = [{
+                "type": "text",
+                "text": "用户随任务目标附上了图片, 请结合图片内容完成任务。",
+            }]
+            parts += [{"type": "image_url", "image_url": {"url": u}} for u in images]
+            initial["messages"] = [HumanMessage(content=parts)]
+        if self.memory is not None:
+            digest = self.memory.digest(goal)
+            if digest:
+                note = ("以下是与该任务可能相关的长期记忆摘录 (供参考, 非本轮指令; "
+                        "如需读写记忆可用 recall_memory / append_memory 工具):\n"
+                        + digest)
+                if initial["messages"]:
+                    initial["messages"][0].content[0]["text"] = \
+                        note + "\n\n" + initial["messages"][0].content[0]["text"]
+                else:
+                    initial["messages"] = [HumanMessage(content=note)]
 
         # 流式执行: 逐节点输出 (verbose 时打印; on_event 时派生界面事件)
         tools_done = 0        # 已完成的工具调用数 (事件中的步骤编号)

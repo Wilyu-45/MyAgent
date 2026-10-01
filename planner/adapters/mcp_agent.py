@@ -27,6 +27,7 @@ from openai import OpenAI
 
 from ..config import settings
 from ..prompts import parse_llm_json
+from ._multimodal import image_content_parts
 from .base import PROJECT_ROOT, make_result
 
 FRAMEWORK = "mcp"
@@ -54,7 +55,47 @@ def _load_server_configs() -> list[dict]:
     if path and Path(path).is_file():
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    return [DEFAULT_SERVER]
+    # 界面「MCP / 插件」区安装的服务器 (enabled 过滤); 空则回落默认 local
+    from .mcp_store import active_server_configs
+
+    return active_server_configs() or [DEFAULT_SERVER]
+
+
+def test_server_connect(cfg: dict, timeout: float = 15.0) -> dict:
+    """连接测试: 拉起 stdio 服务器并发现工具 (市场「测试」按钮用)。
+
+    返回 {ok, tools: [{name, description}], error}。任何失败都转为可读文本。
+    在独立线程起事件循环执行 (uvicorn 请求处理线程内已有运行中的 loop,
+    不能直接 asyncio.run)。
+    """
+    async def _run() -> dict:
+        client = _McpClient(cfg)
+        try:
+            await client.connect()
+            tools = await client.list_tools()
+            return {"ok": True,
+                    "tools": [{"name": t["name"], "description": t["description"]}
+                              for t in tools]}
+        finally:
+            await client.close()
+
+    def _worker() -> None:
+        try:
+            box["value"] = asyncio.run(asyncio.wait_for(_run(), timeout))
+        except Exception as e:  # noqa: BLE001 — 连接失败是结果, 不是崩溃
+            box["value"] = {"ok": False, "tools": [],
+                            "error": "连接超时" if isinstance(e, asyncio.TimeoutError)
+                            else f"{e!r}"}
+
+    box: dict = {}
+    th = threading.Thread(target=_worker, daemon=True)
+    th.start()
+    th.join(timeout + 5)
+    if "value" not in box:
+        return {"ok": False, "tools": [], "error":
+                f"连接超时 ({timeout}s)——命令不存在或服务器未响应 "
+                "(npx/uvx 条目需机器装有 node/uv)"}
+    return box["value"]
 
 
 class _McpClient:
@@ -133,7 +174,7 @@ class _McpAgent:
         if self._on_event is not None:
             self._on_event({"type": "log", "line": line})
 
-    async def run(self, goal: str) -> dict:
+    async def run(self, goal: str, images: Optional[list[str]] = None) -> dict:
         # 1. 连接所有 MCP 服务器并动态发现工具
         self._log("连接 MCP 服务器...")
         for c in self._clients:
@@ -149,10 +190,10 @@ class _McpAgent:
         ) or "(无可用工具)"
         system = SYSTEM_PROMPT.format(tools=tools_block)
 
-        # 2. 文本 ReAct 循环
+        # 2. 文本 ReAct 循环 (图片经多模态 user 消息注入)
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": goal},
+            {"role": "user", "content": image_content_parts(goal, images) if images else goal},
         ]
         trace: list[dict] = []
         for step in range(self._max_steps):
@@ -232,12 +273,13 @@ def run(
     on_event: Optional[Callable[[dict], None]] = None,
     cancel_event: Optional[threading.Event] = None,
     approval: Optional[Callable[[dict], bool]] = None,
+    images: Optional[list[str]] = None,
     **kwargs,
 ) -> dict:
     agent = _McpAgent(model, max_steps, on_event=on_event, cancel_event=cancel_event,
                       approval=approval)
     try:
-        result = asyncio.run(agent.run(goal))
+        result = asyncio.run(agent.run(goal, images=images))
     except Exception as e:
         if cancel_event is not None and cancel_event.is_set():
             result = make_result(FRAMEWORK, goal, status="cancelled", final_answer="用户取消")

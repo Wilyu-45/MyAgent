@@ -23,36 +23,54 @@ async def stream_chat(root: str, model: str, messages: list[dict],
                       max_tokens: Optional[int] = None) -> AsyncIterator[bytes]:
     """转发一条对话消息, 逐 token 产出 delta 事件, 结束产出 done。
 
+    请求附 stream_options.include_usage 尝试拿 token 用量 (done 事件携带 usage);
+    服务不识别该参数 (400) 时自动去掉重试, 用量缺失则 done 不带 usage (静默降级)。
     异常 (服务离线/网络错误) 不抛出, 转为流内 error 事件, 与任务流的错误约定一致。
     """
-    payload: dict = {"model": model, "messages": messages, "stream": True}
+    base: dict = {"model": model, "messages": messages, "stream": True}
     if max_tokens:
-        payload["max_tokens"] = max_tokens
+        base["max_tokens"] = max_tokens
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            async with client.stream("POST", f"{root}/v1/chat/completions",
-                                     json=payload) as r:
-                if r.status_code != 200:
-                    body = (await r.aread()).decode("utf-8", "replace")[:500]
-                    yield _sse({"type": "error",
-                                "message": f"模型服务返回 {r.status_code}: {body}"})
-                    return
-                async for line in r.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        obj = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    choices = obj.get("choices") or []
-                    if not choices:
-                        continue
-                    delta = (choices[0].get("delta") or {}).get("content")
-                    if delta:
-                        yield _sse({"type": "delta", "content": delta})
-        yield _sse({"type": "done"})
+        for with_usage in (True, False):
+            payload = dict(base)
+            if with_usage:
+                payload["stream_options"] = {"include_usage": True}
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                async with client.stream("POST", f"{root}/v1/chat/completions",
+                                         json=payload) as r:
+                    if r.status_code != 200:
+                        body = (await r.aread()).decode("utf-8", "replace")[:500]
+                        if with_usage and r.status_code == 400 \
+                                and "stream_options" in body:
+                            continue    # 旧版 OpenAI 兼容服务不识别, 降级重试
+                        yield _sse({"type": "error",
+                                    "message": f"模型服务返回 {r.status_code}: {body}"})
+                        return
+                    usage: Optional[dict] = None
+                    async for line in r.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            obj = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(obj.get("usage"), dict):
+                            usage = {k: obj["usage"].get(k)
+                                     for k in ("prompt_tokens", "completion_tokens",
+                                               "total_tokens")}
+                        choices = obj.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = (choices[0].get("delta") or {}).get("content")
+                        if delta:
+                            yield _sse({"type": "delta", "content": delta})
+            done = {"type": "done"}
+            if usage and (usage.get("prompt_tokens") or usage.get("completion_tokens")):
+                done["usage"] = usage
+            yield _sse(done)
+            return
     except Exception as e:  # noqa: BLE001 — 任何上游异常都转为流内错误事件
         yield _sse({"type": "error", "message": f"{type(e).__name__}: {e}"})

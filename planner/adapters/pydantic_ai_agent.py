@@ -16,6 +16,7 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from ..config import settings
+from ._multimodal import dataurl_to_bytes
 from .base import make_result
 from .tool_wrappers import build_typed_tools
 
@@ -45,6 +46,21 @@ def _build_llm(model: Optional[str] = None):
     )
 
 
+def _build_prompt(goal: str, images: Optional[list[str]]):
+    """data URL → pydantic-ai 多模态 prompt (文本 + BinaryContent); 无图返回纯文本。"""
+    from pydantic_ai import BinaryContent
+
+    if not images:
+        return goal
+    parts: list = [goal]
+    for u in images:
+        decoded = dataurl_to_bytes(u)
+        if decoded is not None:
+            media, data = decoded
+            parts.append(BinaryContent(data=data, media_type=media))
+    return parts if len(parts) > 1 else goal
+
+
 def run(
     goal: str,
     model: Optional[str] = None,
@@ -52,6 +68,7 @@ def run(
     verbose: bool = False,
     typed: bool = True,
     approval: Optional[Callable[[dict], bool]] = None,
+    images: Optional[list[str]] = None,
     **kwargs,
 ) -> dict:
     llm = _build_llm(model)
@@ -63,8 +80,9 @@ def run(
         output_type=Answer if typed else str,
     )
 
+    prompt = _build_prompt(goal, images)
     try:
-        result = asyncio.run(agent.run(goal))
+        result = asyncio.run(agent.run(prompt))
     except Exception as e:
         if typed:
             # 结构化输出失败 (本地模型 JSON 不稳) -> 回退纯文本
@@ -75,7 +93,7 @@ def run(
                 model_settings={"max_tokens": settings.LLM_MAX_TOKENS},
             )
             try:
-                result = asyncio.run(agent.run(goal))
+                result = asyncio.run(agent.run(prompt))
                 fallback = True
             except Exception as e2:
                 return make_result(FRAMEWORK, goal, status="error", final_answer=f"{e2!r}")

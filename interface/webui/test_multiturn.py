@@ -4,9 +4,10 @@
 覆盖场景:
   1) Agent 层续跑      同 thread_id 第二轮可见第一轮消息历史; 不同 thread 相互独立
   2) 工具历史保留      第一轮工具调用与结果进入第二轮上下文
-  3) 共享检查点        shared_checkpointer() 为进程级单例
+  3) 共享检查点        shared_checkpointer() 为进程级单例 (SQLite 落盘)
   4) TaskManager mock  多轮任务: thread_id 回填快照与事件; 检查点消息跨轮累积
-  5) 重启恢复清洗      落盘恢复后清除 thread_id 痕迹 (检查点随进程消亡)
+  5) 重启恢复续跑      检查点已落盘: 恢复后保留 thread_id 且可跨重启续跑;
+                       检查点中不存在的线程痕迹仍被清洗 (fail-safe)
 
 运行: myagent\\Scripts\\python.exe -m interface.webui.test_multiturn
 """
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -23,11 +25,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+# 测试隔离: 共享检查点落盘到临时目录 (须在首次调用 shared_checkpointer 前设置)
+_TEST_TD = tempfile.mkdtemp(prefix="multiturn_cp_")
+os.environ["AGENT_CHECKPOINT_DB"] = str(Path(_TEST_TD) / "checkpoints.sqlite")
+
 from langchain_core.messages import AIMessage  # noqa: E402
 from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
 
 from interface.webui.tasks import TaskManager  # noqa: E402
-from planner.adapters.langgraph_agent import shared_checkpointer  # noqa: E402
+from planner.adapters.langgraph_agent import (  # noqa: E402
+    known_thread_ids,
+    shared_checkpointer,
+)
 from planner.agent import Agent  # noqa: E402
 from planner.llm import ScriptedLLM  # noqa: E402
 
@@ -162,28 +171,42 @@ def scenario_manager_mock() -> None:
 
 
 def scenario_restore() -> None:
-    """场景 5: 落盘保留 thread_id (快照用), 重启恢复后清洗 (检查点已失)。"""
+    """场景 5: 检查点落盘后重启可续跑; 缺失线程痕迹仍清洗 (fail-safe)。"""
     with tempfile.TemporaryDirectory(prefix="multiturn_") as td:
         path = Path(td) / "ui_tasks.json"
         loop1 = _new_loop()
         mgr1 = TaskManager(loop1, mock=True, history_path=path)
-        t1, _ = mgr1.submit("落盘任务", "langgraph", None, 4)
+        t1, _ = mgr1.submit("落盘任务: 列出目录", "langgraph", None, 4)
         s1 = _wait_status(mgr1, t1.task_id, "finished")
         tid = (s1 or {}).get("thread_id")
         _shutdown(mgr1, loop1)
         check("落盘文件存在", path.is_file())
         raw = json.loads(path.read_text(encoding="utf-8"))
         check("落盘保留 thread_id", raw["tasks"][0].get("thread_id") == tid)
+        check("检查点库含该线程 (SQLite 落盘)", tid in known_thread_ids(), str(tid))
+
+        # 伪造一条检查点中不存在的续跑痕迹 (库被删/损坏的退化场景)
+        raw["tasks"].append(dict(raw["tasks"][0], task_id="t-bogus000",
+                                 thread_id="task-bogus999"))
+        path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
 
         loop2 = _new_loop()
         mgr2 = TaskManager(loop2, mock=True, history_path=path)
         try:
             s2 = mgr2.snapshot(t1.task_id)
-            check("恢复后快照无 thread_id", bool(s2) and not s2.get("thread_id"))
-            evs = [e for e in (s2 or {}).get("events", []) if e["type"] == "result"]
-            check("恢复后 result 事件无 thread_id", bool(evs) and "thread_id" not in evs[0])
-            check("恢复后 result 字段无 thread_id",
-                  "thread_id" not in ((s2 or {}).get("result") or {}))
+            check("恢复后快照保留 thread_id", bool(s2) and s2.get("thread_id") == tid,
+                  str((s2 or {}).get("thread_id")))
+            check("伪造痕迹被清洗 (线程不存在)",
+                  mgr2.snapshot("t-bogus000").get("thread_id") is None)
+
+            # 跨重启续跑: 同 thread_id 再跑一轮, 检查点历史继续累积
+            t3, _ = mgr2.submit("重启后的第二轮", "langgraph", None, 4, thread_id=tid)
+            s3 = _wait_status(mgr2, t3.task_id, "finished")
+            check("跨重启续跑完成", bool(s3) and s3["status"] == "finished"
+                  and s3.get("thread_id") == tid, str((s3 or {}).get("thread_id")))
+            saved = _checkpoint_messages(shared_checkpointer(), tid)
+            ai_n = sum(1 for m in saved if isinstance(m, AIMessage))
+            check("跨重启消息累积 (>=4 条 AI)", ai_n >= 4, f"ai={ai_n}")
         finally:
             _shutdown(mgr2, loop2)
 
@@ -198,7 +221,7 @@ def main() -> None:
           shared_checkpointer() is shared_checkpointer())
     print("== 4) TaskManager mock 多轮 ==")
     scenario_manager_mock()
-    print("== 5) 重启恢复清洗 ==")
+    print("== 5) 重启恢复续跑 ==")
     scenario_restore()
 
     print(f"\n{PASSED} passed, {FAILED} failed")

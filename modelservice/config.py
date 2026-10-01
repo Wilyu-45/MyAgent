@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # 单卡场景下,加载新模型时自动卸载其他已加载的模型(释放 VRAM)
     AUTO_EVICT: bool = True
 
+    # response_format=json_object 是否启用 GBNF grammar 语法级强制(默认关:
+    # 实测约束采样慢 ~10x;默认仅 prompt 提示约束,JSON 合法性由客户端校验兜底)
+    JSON_GRAMMAR_ENFORCE: bool = False
+
     # -------- 服务 --------
     HOST: str = "0.0.0.0"
     PORT: int = 8000

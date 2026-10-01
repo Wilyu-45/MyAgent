@@ -12,6 +12,9 @@ runner 输出协议 (stdout, 每行实时读取):
   - 审批行: "__APPROVAL__{json}" 哨兵 (高风险操作需人工确认时由 runner 发出),
     父进程解析后调用 approval_fn, 并往子进程 stdin 回写 {"approved": bool} 一行;
     仅当提供 approval_fn 时才启用 (env AGENT_APPROVAL=1); 审批行不转日志。
+  - 图片通道: run_in_venv(images=...) 时 data URL 解码为临时目录中的文件,
+    路径列表 JSON 经 env AGENT_IMAGES_JSON 注入 (data URL 太长不宜走 argv);
+    runner 自行读取, 进程结束后临时目录被清理。
 
 取消 (协作式, 双路径):
   - on_event 回调抛异常 (如界面层 TaskCancelled) -> 立即终止子进程并透传;
@@ -20,11 +23,14 @@ runner 输出协议 (stdout, 每行实时读取):
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import queue
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -44,11 +50,33 @@ RUNNERS_DIR = PROJECT_ROOT / "planner" / "adapters" / "runners"
 RESULT_PREFIX = "__RESULT__"
 # 审批请求行哨兵: runner 以此询问高风险操作可否执行, 父进程经 stdin 回复
 APPROVAL_PREFIX = "__APPROVAL__"
+# 图片通道环境变量名 (与支持多模态的 runner 保持一致)
+IMAGES_ENV = "AGENT_IMAGES_JSON"
 
 RUN_TIMEOUT = 1800      # 子进程总超时 (秒)
 _POLL_SEC = 0.5         # 取消 / 超时轮询间隔
 _MAX_LINE = 600         # 单条日志行最大长度 (超出截断)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def stage_images(images: list[str]) -> tuple[Optional[str], Path]:
+    """data URL 图片解码到临时目录, 返回 (路径列表 JSON, 临时目录)。
+
+    写盘而非走 argv/stdin: data URL 体积大且含特殊字符。调用方负责用完清理目录。
+    """
+    tmpdir = Path(tempfile.mkdtemp(prefix="agent_images_"))
+    paths: list[str] = []
+    for i, url in enumerate(images):
+        meta, _, b64 = url.partition(",")
+        ext = "png"
+        m = re.match(r"data:image/([a-z]+)", meta)
+        if m:
+            ext = {"jpeg": "jpg", "jpg": "jpg", "png": "png",
+                   "gif": "gif", "webp": "webp"}.get(m.group(1), "png")
+        p = tmpdir / f"image_{i}.{ext}"
+        p.write_bytes(base64.b64decode(b64))
+        paths.append(str(p))
+    return json.dumps(paths), tmpdir
 
 
 def make_result(
@@ -104,12 +132,14 @@ def run_in_venv(
     on_event: Optional[Callable[[dict], None]] = None,
     cancel_event: Optional[threading.Event] = None,
     approval_fn: Optional[Callable[[dict], bool]] = None,
+    images: Optional[list[str]] = None,
     **kwargs: Any,
 ) -> dict:
     """在隔离 venv 中执行 runner 脚本, 流式读取 stdout (协议见模块开头说明)。
 
     approval_fn: 可选人工审批回调; 提供时启用 __APPROVAL__ 通道 (env 注入
         AGENT_APPROVAL=1 并挂载 stdin), 未提供时 runner 内部直接放行。
+    images: 可选 data URL 图片列表; 提供时经 AGENT_IMAGES_JSON 临时文件通道注入。
     """
     venv_python = VENV_PYTHON.get(framework)
     runner = RUNNERS_DIR / f"{framework}_runner.py"
@@ -133,6 +163,13 @@ def run_in_venv(
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
     if approval_fn is not None:
         env["AGENT_APPROVAL"] = "1"
+    images_dir: Optional[Path] = None
+    if images:
+        try:
+            env[IMAGES_ENV], images_dir = stage_images(images)
+        except Exception as e:
+            return make_result(framework, goal, status="error",
+                               final_answer=f"图片临时文件写入失败: {e!r}")
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -141,6 +178,8 @@ def run_in_venv(
             cwd=str(PROJECT_ROOT), env=env, bufsize=1,
         )
     except Exception as e:
+        if images_dir is not None:
+            shutil.rmtree(images_dir, ignore_errors=True)
         return make_result(framework, goal, status="error", final_answer=f"runner 启动失败: {e!r}")
 
     lines: list[str] = []                 # 全部输出 (供兜底解析)
@@ -242,6 +281,8 @@ def run_in_venv(
     finally:
         if proc.poll() is None:
             _kill()
+        if images_dir is not None:
+            shutil.rmtree(images_dir, ignore_errors=True)
 
     if result is None:                        # 旧协议兜底: 从末尾向前找结果 JSON 行
         for line in reversed(lines):

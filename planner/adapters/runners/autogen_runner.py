@@ -29,8 +29,8 @@ from perception import get_frontmost_window, get_system_info  # noqa: E402
 from sandbox import SandboxPolicy  # noqa: E402
 
 from autogen_agentchat.agents import AssistantAgent  # noqa: E402
-from autogen_agentchat.messages import TextMessage  # noqa: E402
-from autogen_core import CancellationToken  # noqa: E402
+from autogen_agentchat.messages import MultiModalMessage, TextMessage  # noqa: E402
+from autogen_core import CancellationToken, Image as AGImage  # noqa: E402
 from autogen_ext.models.openai import OpenAIChatCompletionClient  # noqa: E402
 
 DEFAULT_MODEL = os.getenv("AGENT_LLM_MODEL", "qwen3.5-9b-uncensored")
@@ -143,7 +143,30 @@ def _read_file(path: str, limit: int) -> str:
     return "\n".join(lines[:limit])
 
 
+def _load_images():
+    """读取 base.py 注入的图片临时文件 (AGENT_IMAGES_JSON: 路径列表 JSON)。"""
+    raw = os.getenv("AGENT_IMAGES_JSON")
+    if not raw:
+        return []
+    try:
+        paths = json.loads(raw)
+    except Exception:
+        return []
+    images = []
+    try:
+        from PIL import Image
+        for p in paths or []:
+            if Path(p).is_file():
+                with Image.open(p) as im:
+                    images.append(AGImage.from_pil(im.convert("RGB")))
+    except Exception as e:
+        _emit(f"图片加载失败, 忽略: {type(e).__name__}: {e}")
+        return []
+    return images
+
+
 async def _run(goal: str, model: str, max_steps: int) -> dict:
+    images = _load_images()
     model_client = OpenAIChatCompletionClient(
         model=model,
         base_url=BASE_URL,
@@ -153,7 +176,7 @@ async def _run(goal: str, model: str, max_steps: int) -> dict:
             "function_calling": False,
             "json_output": False,
             "structured_output": False,
-            "vision": False,
+            "vision": bool(images),  # 有图时允许 image 内容
         },
     )
     assistant = AssistantAgent(
@@ -162,7 +185,11 @@ async def _run(goal: str, model: str, max_steps: int) -> dict:
         system_message=SYSTEM_PROMPT.format(goal=goal),
     )
 
-    messages = [TextMessage(content=goal, source="user")]
+    if images:
+        _emit(f"随任务附上 {len(images)} 张图片")
+        messages = [MultiModalMessage(content=[goal] + images, source="user")]
+    else:
+        messages = [TextMessage(content=goal, source="user")]
     trace: list[dict] = []
     final_answer = ""
     steps = 0

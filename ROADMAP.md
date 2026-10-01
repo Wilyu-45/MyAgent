@@ -12,6 +12,17 @@
 - **Chat 增强**（2026-09）：Chat 助手回答 Markdown 渲染（零依赖自实现 `static/md.js`：标题 / 列表 / 代码块 / 引用 / 粗体斜体 / 链接等子集；解析为纯函数可离线测试，DOM 逐节点构建防 XSS，链接仅放行 http(s) / mailto）；回答一键重试、用户消息行内编辑重发（对话行即真相，消息历史在发送时实时派生）。验收：`interface/webui/test_markdown.js`（25 项，node 离线）+ 浏览器端到端实跑（渲染 / 重试 / 编辑重发）。
 - **多轮 Agent 对话**（2026-09）：任务卡片完成且返回 `thread_id` 时出现「↩ 继续此对话」入口（内联输入 → 同一会话续跑，模型可见历史与工具结果）；LangGraph 检查点改为进程级共享（`langgraph_agent.shared_checkpointer()`），`thread_id` 经 `TaskCreate` → `submit` → `run_framework` 全链路透传（其余框架静默忽略）；mock 模式接入共享检查点可离线演示；检查点仅存进程内存——落盘保留 `thread_id` 供同进程快照，启动恢复清洗续跑痕迹。附带修复：达步数上限后收尾提醒只发一次（模型仍不收尾则强制 `finalize`，杜绝 `wrap_up` 死循环；langgraph 1.x 默认递归上限 10007，图必须能自行终止）；模型把 `final_answer` 写成工具调用形式时容错提取。验收：`interface/webui/test_multiturn.py`（22 项）+ `planner/test_graph.py`（10 项）+ 服务级实跑（真实模型两轮记忆 + 浏览器继续交互）。
 - **访问令牌与局域网访问**（2026-09）：`--token` 启用后 `/api/*` 与 `/health` 需携带令牌（`Authorization: Bearer` / `X-Auth-Token` / `webui_token` cookie（EventSource 通道）/ `?token=` 四通道，`hmac.compare_digest` 常数时间比较），静态页公开；单独给出 `--token` 随机生成令牌；`--host 0.0.0.0` 未配令牌时启动告警（不强制）；前端从 `?token=` 分享链接或 localStorage 取令牌自动注入（fetch 走请求头、EventSource 走同源 cookie），存取后清洗地址栏，未授权时状态灯与 toast 提示。验收：`interface/webui/test_auth.py`（31 项）+ `test_e2e.py` 令牌模式实跑（`WEBUI_TOKEN`）+ 浏览器端到端（未授权提示 / 分享链接存取 / 任务全链路）。
+- **图片输入（多模态）**（2026-09）：Agent 任务与 Chat 输入区均支持选择 / 粘贴 / 拖拽图片（`static/multimodal.js` 纯函数校验：png/jpg/gif/webp，≤4 张、单张 ≤5MB，data URL 内联），缩略预览可移除；Agent 侧 `TaskCreate.images` → `run_framework` → `Agent.run` 全链路透传，langgraph 构造多模态 user 消息（text + image_url content parts，续跑时追加为最新消息；其余框架带图 422 `images_unsupported`）；Chat `content` 放开为 content parts 直透 modelservice；快照 / 落盘仅记 `image_count` 不含图片数据；静态资源补 `Cache-Control: no-cache` 防发版旧 JS。验收：`interface/webui/test_multimodal.py`（28 项）+ `test_multimodal.js`（21 项，node 离线）+ 浏览器端到端（粘贴上传 → mock 任务卡片含图 → Chat 气泡缩略条与 content parts 派生）。
+- **定时/触发任务**（2026-10）：侧栏「定时任务」管理区（创建 / 暂停 / 启用 / 立即运行 / 删除）；三种计划 `interval`（每 N 分钟）/ `daily`（每日 HH:MM）/ `cron`（5 字段表达式，零依赖自实现解析：区间 / 列表 / 步进 / 日+周并集语义）；`interface/webui/schedules.py` 后台巡检线程到点经 `TaskManager.submit` 提交（顺延 next_run、停机期间错失不补跑、累计 1000 次自动停用 fail-safe）；计划原子落盘 `memory/ui_schedules.json`（mock 单独文件，启动恢复；`AGENT_SCHEDULES_JSON` 可覆盖路径供测试隔离）。REST：`GET/POST /api/schedules`、`/toggle`、`/run-now`、`DELETE`。验收：`interface/webui/test_schedules.py`（53 项）+ 浏览器端到端（创建 → 暂停 → 立即运行 mock 任务完成 → 重启恢复 → 删除）。
+- **桌面壳打包（pywebview）**（2026-10）：`python -m interface.webui --desktop` 以原生窗口运行 WebUI——`interface/webui/desktop.py` 在 127.0.0.1 临时空闲端口起 uvicorn 守护线程（与浏览器模式同一套 app，忽略 `--host/--port/--open`），轮询 `/health`（令牌模式带 Bearer 头）就绪后开窗（默认 1280×820，最小 960×640，WebView2 内核），启用 `--token` 时自动带 `?token=` 打开；窗口关闭 → `server.should_exit` 收尾退出，未装 pywebview 时打印安装提示并以退出码 1 退出。Windows 依赖 WebView2 Runtime（Win10/11 自带）。验收：`interface/webui/test_desktop.py`（13 项离线：端口申请 / 服务就绪 / 令牌探活 / 缺依赖兜底 / CLI 接线；`WEBUI_DESKTOP_SMOKE=1` 可选真实窗口冒烟 +2 项）。
+- **截图直传**（2026-10）：Agent 任务与 Chat 输入区新增 📷 屏幕截图按钮——`static/multimodal.js` 的 `captureScreenshot()` 经浏览器 `getDisplayMedia` 选屏抓帧 → canvas 转 JPEG data URL（超单张上限自动降采样重试 ≤4 次，不支持 / 取消 / 失败返回 null 并释放媒体轨），复用既有图片附件管线（4 张 / 5MB 约束、缩略预览、content parts 派生），零后端改动。验收：`test_multimodal.js` 扩至 29 项（无 API 降级 / 用户取消 / 桩 DOM 抓帧 / 媒体轨释放 / 降采样重试）+ 浏览器端到端（按钮渲染 / 桩捕获入列 / 失败不误加）。
+- **任务多模态扩展到其余框架**（2026-10）：图片输入从仅 langgraph 扩展到 7 框架中的 6 个——`planner/adapters/_multimodal.py` 提供 data URL 解码公共工具（bytes / PIL / OpenAI parts）；进程内适配器各自注入：mcp（user 消息改 content parts）、smolagents（`agent.run(images=[PIL])` 原生入口，旧版无该参数时显式报错）、pydantic-ai（`BinaryContent` 注入 prompt）、llamaindex（`ChatMessage` + `ImageBlock`）；子进程框架走临时文件通道——`base.stage_images()` 将 data URL 解码到临时目录、路径列表 JSON 经 `AGENT_IMAGES_JSON` 环境变量注入（data URL 不宜走 argv），autogen runner 读取后经 `AGImage` 构造 `MultiModalMessage`（`model_info.vision` 按有无图设置），进程结束临时目录清理；crewai（Task 无 images 参数，本地视觉链路不可靠）保持不支持（422 / 显式报错）。框架支持面改由 `manifest.json` 的 `images` 字段声明（单一数据源），`/api/frameworks` 透出，前端按所选框架禁用任务附件按钮（Chat 不受框架约束）。验收：`test_multimodal.py` 扩至 51 项（公共工具 / 四适配器桩注入 / 子进程通道 env 透传与清理 / API 矩阵）+ 浏览器端到端（crewai 禁用 / langgraph 启用）+ `test_runner_stream.py`（26 项）回归。
+- **可观测性（任务指标 + Chat token 用量）**（2026-10）：事件流与任务卡片可看运行开销——`interface/webui/tasks.py` 新增 `task_metrics()`（从事件流推导：`queue_ms` 排队耗时 / `duration_ms` 执行耗时 / 事件数 / 思考步数 / 工具调用与结果数），result 事件携带 `metrics`（前端在卡片最终答复下追加 📊 指标行），snapshot / summary / 历史落盘统一含 `metrics`（历史列表行显示总耗时）；事件信封本就带 `ts`（时间戳单调性纳入测试保障）；Chat 侧 `interface/webui/chat.py` 请求附 `stream_options.include_usage`，modelservice 返回用量时 done 事件携带 `{prompt_tokens, completion_tokens, total_tokens}`（气泡尾部小字显示），服务不识别该参数（400 报文中含 stream_options）自动降级重试、无 usage 静默省略——全程离线可测。验收：`interface/webui/test_observability.py`（25 项：事件 ts / seq 单调 / 指标口径 / 落盘 / 桩 modelservice 三模式用量透传与降级）+ 全部既有离线套件回归。
+- **长期记忆增强**（2026-10）：Memory 从纯键值备忘升级为可检索记忆库——`memory/__init__.py` 新增 `search`（零依赖关键词检索：ASCII 词 + CJK 二元组重合度 + 新近加权，跨分类）、`digest`（注入用摘录：相关条目优先、无命中取最近 3 条、800 字符预算）、`remove / remove_key / stats`；**任务自动注入**——`Agent.run` 依 goal 检索相关记忆摘录并入本轮首条 user 消息（与图片多模态消息合并；无记忆行为不变），`Agent(memory=)` 让注入与 `append_memory` / `recall_memory` 工具共用同一实例；**Chat 自动注入**——`/api/chat/stream` 以最后一条 user 文本为查询，命中时消息前插入 system 摘录（每请求重读文件避免与任务侧写入互覆，失败静默跳过）；**管理面板**——侧栏「长期记忆」区（分类概览 / 添加 / 搜索 / 删除）+ REST `GET/POST /api/memory`、`DELETE /api/memory/{key}[/{index}]`。验收：`interface/webui/test_memory.py`（33 项：Memory 核心 / Agent 注入 / Chat 注入 / REST CRUD）+ 全部既有套件回归（`test_graph` / `test_multimodal` 等 10 套）。
+- **RAG / 知识库**（2026-10）：本地文档导入 + 零依赖 BM25 检索——`planner/knowledge.py` 提供 `KnowledgeBase`：txt/md 直读文本、pdf 经 pypdf 抽取（扫描件/缺库/损坏均显式 422 `parse_failed`）；空行分段合并分块（目标 500 字，超长硬切留 80 字重叠）；BM25 检索复用记忆层分词（ASCII 词 + CJK 二元组）；单 JSON 落盘 `memory/kb/knowledge.json`（`AGENT_KB_FILE` 可覆盖），词索引加载时重建；容量 fail-safe（单文档 2MB / 100 篇 / 5000 块）。**工具接入**——`search_knowledge` 工具进默认注册表（safe 级），模型在任务中可检索并引用原文片段（空库 / 无命中给可读提示）；**管理面板**——侧栏「知识库」区（导入 / 文档列表与删除 / 检索框）+ REST `GET /api/kb`、`POST /api/kb`（JSON 传输：文本直传 / pdf base64，免 multipart 依赖）、`DELETE /api/kb/{id}`、`GET /api/kb/search`。验收：`interface/webui/test_knowledge.py`（40 项：分块 / BM25 / 解码 / 存储与上限 / 工具 / REST，含程序化构造 pypdf 可解析的最小 PDF）+ 全部既有套件回归（12 套）。依赖：`requirements.txt` 追加 `pypdf==6.19.0`。
+- **断点续跑（检查点落盘）**（2026-10）：LangGraph 检查点从进程内存升级 SQLite 落盘——`shared_checkpointer()` 返回 `SqliteSaver`（`memory/checkpoints.sqlite`，`AGENT_CHECKPOINT_DB` 可覆盖供测试隔离，`check_same_thread=False` + 幂等 `.setup()`），**服务重启后「↩ 继续此对话」仍可续跑旧会话**（检查点消息历史跨进程保留）；新增 `checkpoint_db_path()` / `known_thread_ids()`（独立只读连接查询库内线程，库缺失 / 损坏返回空集 fail-safe）；启动恢复按检查点库校验落盘任务中的 `thread_id`——库内存在的线程保留续跑入口（快照 / 事件 / result 同步补全 `thread_id` 字段），已不存在的清洗（检查点库被删时退化为旧行为）；恢复的 Task 现在还原 `thread_id` 字段。CLI 直跑仍为独立 `MemorySaver`（行为不变）。依赖：`requirements.txt` 追加 `langgraph-checkpoint-sqlite==3.1.1`。验收：`interface/webui/test_multiturn.py` 扩至 24 项（新增场景 5「重启恢复续跑」：旧进程写线程 → 新 TaskManager 恢复保留 thread_id / 伪造不存在线程被清洗 / 跨重启同 thread_id 续跑完成且消息累积）+ 全部既有套件回归（12 套）。
+- **插件 / MCP 市场**（2026-10）：界面化管理 MCP 服务器——`planner/adapters/mcp_store.py` 提供 `McpStore`（配置原子落盘 `memory/mcp_servers.json`，`AGENT_MCP_SERVERS_JSON` 可覆盖供测试隔离；校验 / 容量 fail-safe）+ 内置市场目录 `CATALOG`（项目自带 local 工具集 + 官方 filesystem / memory / sequential-thinking / everything（npx）与 fetch / time（uvx）等 7 条静态清单）；`mcp_agent._load_server_configs` 加载优先级：`MCP_SERVERS_JSON` env 显式文件 → store 中 enabled 服务器（全停用回落默认 local）——**界面安装即对后续 mcp 框架任务生效，无需重启**。REST：`GET /api/mcp`（服务器 + 目录含 installed 标记）、`POST /api/mcp`（自定义）、`POST /api/mcp/install`（目录一键安装，重复 409）、`POST /api/mcp/{name}/toggle`、`DELETE /api/mcp/{name}`、`POST /api/mcp/{name}/test`（**真实拉起 stdio 服务器并发现工具**，独立线程事件循环——uvicorn loop 内不能 asyncio.run，超时 / 坏命令转可读错误）。前端：侧栏「MCP / 插件」区（添加自定义服务器 / 已配置列表含启停 / 删除 / 测试 + 市场目录一键安装）。验收：`interface/webui/test_mcp_market.py`（47 项：store CRUD / 加载优先级 / 目录 / REST 错误码 / 真实连接测试发现 8 个本地工具）+ 全部既有套件回归（13 套）+ 浏览器端到端（安装 → 测试 toast 工具清单 → 停用 ⏸ → 自定义添加 → 删除 → 空态）。
+- **深色主题 / 多语言**（2026-10）：纯前端零依赖界面打磨——**主题**：`style.css` 全量 CSS 变量化（`:root` 浅色 + `html[data-theme="dark"]` 覆盖，约 50 个 token，`color-scheme` 同步），`theme.js`（🌙/☀ 顶栏切换，localStorage `ui_theme` 记忆，首次访问跟随系统 `prefers-color-scheme`，head 内联早执行防闪白）；**多语言**：`i18n.js` 中文原文即键设计（`t("发送")` 动态文案零重构接入，toast 内部统一走 `t`；静态框架经 `data-i18n/-ph/-title` 标记扫描；语义键经 `I18N_EN`/`I18N_ZH` 双表；`{0}` 占位符替换），顶栏 EN/中 切换 + localStorage `ui_lang` 记忆 + 浏览器语言默认，切换后 `onI18nChange` 重渲染全部动态面板。验收：`interface/webui/test_theme_i18n.js`（42 项 Node 离线：纯函数分支 / 持久化 / 字典完备性——index.html 全部标记键 + app.js 全部 `t()` 字面量均有词条 / CSS 变量化断言）+ md/multimodal 前端回归 + 浏览器端到端（🌙 切换与刷新持久、暗色 `color-scheme` 生效、EN 切换静态框架与动态 toast 全翻译、往返切换无残留、无 JS 错误）。
 
 ## P2（近期：界面设计内的补齐）
 
@@ -19,25 +30,23 @@
 
 ## P3（中期）
 
-- 桌面壳打包（pywebview）。
-- 图片输入（模型支持多模态，`mmproj` 已有基础）。
-- 定时/触发任务（cron 式调度）。
+（已全部完成）
 
 ## 对比市面 Agent 的功能差距（未排期，供规划）
 
 | 能力 | 市面常见 | 本项目现状 | 建议 |
 | :--- | :--- | :--- | :--- |
-| 多模态输入（截图/图片） | ✔ | 模型就绪，UI 未接 | P3 |
+| 多模态输入（截图/图片） | ✔ | 图片输入已接（任务/Chat 双模式 + 📷 截图直传；7 框架中 6 个支持，仅 crewai 除外；需 mmproj 模型） | ✔ |
 | 语音输入/输出 | ✔ | 无 | 远期 |
-| RAG / 知识库 | ✔ | 无（MinerU 可作解析基础） | P3 |
-| 长期记忆 / 用户画像 | ✔ | 基础 JSON 长期记忆 | P2 |
-| 任务持久化 / 断点续跑 | ✔ | 历史已落盘；多轮会话续跑（检查点进程内存级）；进程重启断点续跑无 | P3 |
+| RAG / 知识库 | ✔ | 本地文档知识库（txt/md/pdf 导入 + BM25 检索，任务经 `search_knowledge` 工具引用原文，界面管理面板）；无向量/语义检索 | ✔ |
+| 长期记忆 / 用户画像 | ✔ | 可检索长期记忆（关键词检索 + 任务/Chat 自动注入相关摘录 + 界面管理面板）；无画像建模 | ✔ |
+| 任务持久化 / 断点续跑 | ✔ | 历史已落盘；多轮会话续跑（检查点 SQLite 落盘，进程重启后仍可续跑旧会话） | ✔ |
 | 人机协同审批 | ✔ | 沙箱策略 + 界面审批卡片（批准 / 拒绝 / 超时；三链路接入） | ✔ |
-| 多轮会话 / 上下文延续 | ✔ | 任务卡片「↩ 继续此对话」（LangGraph 检查点续跑，进程内存级） | ✔ |
-| 插件 / MCP 市场 | ✔ | MCP 客户端就绪，无市场 | P3 |
+| 多轮会话 / 上下文延续 | ✔ | 任务卡片「↩ 继续此对话」（LangGraph 检查点续跑，SQLite 落盘跨重启可用） | ✔ |
+| 插件 / MCP 市场 | ✔ | 界面 MCP 市场（目录一键安装 + 自定义添加 + 启停 / 删除 / 连接测试，mcp 框架任务自动加载）；目录为静态内置清单，非在线商店 | ✔ |
 | 多用户 / 权限 / 审计 | ✔ | 单机单用户 | 远期 |
-| 可观测性（追踪 / 成本） | ✔ | 日志基础 | P3 |
+| 可观测性（追踪 / 成本） | ✔ | 任务级指标（排队 / 总耗时 / 思考步 / 工具调用，事件流 + 卡片 + 落盘）+ Chat token 用量显示；无分布式追踪 / 成本核算 | P3 |
 | 移动端 / 远程访问 | ✔ | 局域网访问 + 令牌鉴权（明文 HTTP，无 HTTPS） | ✔ |
 | Markdown 富文本渲染 | ✔ | Chat 气泡 Markdown 渲染（零依赖自实现，XSS 安全） | ✔ |
-| 深色主题 / 多语言 | ✔ | 浅色 / 中文 | P3 |
-| 定时任务 / 触发器 | ✔ | 无 | P3 |
+| 深色主题 / 多语言 | ✔ | 深色主题（🌙 切换 + localStorage 记忆 + prefers-color-scheme 默认，全量 CSS 变量化）/ 界面中英双语（顶栏 EN/中 切换 + localStorage 记忆 + 浏览器语言默认；后端动态串保持中文） | ✔ |
+| 定时任务 / 触发器 | ✔ | 定时任务已接（interval / daily / cron，落盘恢复，错失不补跑） | ✔ |

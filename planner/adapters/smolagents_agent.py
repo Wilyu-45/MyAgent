@@ -15,6 +15,7 @@ from typing import Callable, Optional
 from smolagents import CodeAgent, OpenAIServerModel, tool as smol_tool
 
 from ..config import settings
+from ._multimodal import dataurl_to_pil
 from .base import make_result
 from .tool_wrappers import build_typed_tools
 
@@ -49,6 +50,7 @@ def run(
     on_event: Optional[Callable[[dict], None]] = None,
     cancel_event: Optional[threading.Event] = None,
     approval: Optional[Callable[[dict], bool]] = None,
+    images: Optional[list[str]] = None,
     **kwargs,
 ) -> dict:
     llm = OpenAIServerModel(
@@ -72,7 +74,15 @@ def run(
             model=llm,
             **agent_kwargs,
         )
+    # data URL → PIL.Image (smolagents run(images=...) 原生多模态入口)
+    pils = [img for img in (dataurl_to_pil(u) for u in images or []) if img is not None]
     try:
+        answer = agent.run(goal, max_steps=max_steps or settings.MAX_STEPS,
+                           images=pils or None)
+    except TypeError:
+        if pils:
+            return make_result(FRAMEWORK, goal, status="error",
+                               final_answer="当前 smolagents 版本不支持图片输入")
         answer = agent.run(goal, max_steps=max_steps or settings.MAX_STEPS)
     except Exception as e:
         if cancel_event is not None and cancel_event.is_set():

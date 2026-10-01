@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 from planner.adapters import run_framework
+from planner.adapters.langgraph_agent import known_thread_ids
 
 MAX_EVENTS = 2000      # 单任务事件缓冲上限 (超出裁剪最旧的)
 MAX_HISTORY = 50       # 内存保留的最近任务数
@@ -38,6 +39,26 @@ logger = logging.getLogger("interface.webui.tasks")
 # 终态类事件: 不受取消标志影响 (保证收尾一定能发出)
 TERMINAL_TYPES = {"result", "error", "cancelled", "close"}
 TERMINAL_STATUS = {"finished", "error", "max_steps_exceeded", "cancelled"}
+
+# 参与指标计数的事件类型
+_METRIC_EVENT_TYPES = ("thought", "tool", "tool_result")
+
+
+def task_metrics(t: "Task") -> dict:
+    """从事件流推导任务运行指标 (事件缓冲超出上限时计数随裁剪截断)。"""
+    counts = dict.fromkeys(_METRIC_EVENT_TYPES, 0)
+    for ev in t.events:
+        ev_type = ev.get("type")
+        if ev_type in counts:
+            counts[ev_type] += 1
+    return {
+        "queue_ms": int(((t.started_at or t.created_at) - t.created_at) * 1000),
+        "duration_ms": int(((t.finished_at or time.time()) - (t.started_at or t.created_at)) * 1000),
+        "events": len(t.events),
+        "thoughts": counts["thought"],
+        "tool_calls": counts["tool"],
+        "tool_results": counts["tool_result"],
+    }
 
 
 class TaskCancelled(Exception):
@@ -53,6 +74,7 @@ class Task:
     max_steps: Optional[int]
     status: str = "queued"  # queued | running | finished | error | max_steps_exceeded | cancelled
     thread_id: Optional[str] = None   # 多轮对话标识 (langgraph 检查点; None = 新线程或不支持)
+    images: Optional[list[str]] = None   # 随任务附上的图片 (data URL; 多模态, 不落盘)
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
@@ -76,6 +98,8 @@ class Task:
             "status": self.status,
             "created_at": self.created_at,
             "steps": (self.result or {}).get("steps"),
+            "image_count": len(self.images or []),
+            "metrics": task_metrics(self),
         }
 
 
@@ -105,12 +129,13 @@ class TaskManager:
 
     def submit(self, goal: str, framework: str, model: Optional[str],
                max_steps: Optional[int],
-               thread_id: Optional[str] = None) -> tuple[Task, int]:
+               thread_id: Optional[str] = None,
+               images: Optional[list[str]] = None) -> tuple[Task, int]:
         """入队新任务; 返回 (任务, 排队位次)。thread_id 非空时续跑该会话。"""
         task = Task(
             task_id=f"t-{uuid.uuid4().hex[:8]}",
             goal=goal, framework=framework, model=model, max_steps=max_steps,
-            thread_id=thread_id,
+            thread_id=thread_id, images=list(images) if images else None,
         )
         self._tasks[task.task_id] = task
         self._order.append(task.task_id)
@@ -237,7 +262,10 @@ class TaskManager:
 
     @staticmethod
     def _record(t: Task) -> dict:
-        """任务的完整记录 (snapshot 与落盘共用同一字段集)。"""
+        """任务的完整记录 (snapshot 与落盘共用同一字段集)。
+
+        图片数据不落盘 (base64 体积大), 只记张数供回看展示。
+        """
         return {
             "task_id": t.task_id,
             "goal": t.goal,
@@ -245,12 +273,14 @@ class TaskManager:
             "model": t.model,
             "max_steps": t.max_steps,
             "thread_id": t.thread_id,
+            "image_count": len(t.images or []),
             "status": t.status,
             "created_at": t.created_at,
             "started_at": t.started_at,
             "finished_at": t.finished_at,
             "events": list(t.events),
             "result": t.result,
+            "metrics": task_metrics(t),
         }
 
     def _load_history(self) -> None:
@@ -261,21 +291,30 @@ class TaskManager:
             data = json.loads(self._history_path.read_text(encoding="utf-8"))
             entries = data.get("tasks", []) if isinstance(data, dict) else []
             for e in entries:
-                tid = e.get("task_id") if isinstance(e, dict) else None
-                if not isinstance(tid, str) or not tid or tid in self._tasks:
+                task_id = e.get("task_id") if isinstance(e, dict) else None
+                if not isinstance(task_id, str) or not task_id or task_id in self._tasks:
                     continue
                 if e.get("status") not in TERMINAL_STATUS:
                     continue
                 events = [ev for ev in e.get("events", []) if isinstance(ev, dict)]
                 result = e.get("result")
-                # 检查点仅存于进程内存: 重启后会话上下文已失, 清除续跑痕迹
+                # 检查点已 SQLite 落盘: 重启后仍可续跑; 仅清洗检查点中已不存在的线程
+                # (检查点库被删/损坏时退化为旧行为: 清除全部续跑痕迹)
+                known = known_thread_ids()
                 for ev in events:
                     if ev.get("type") == "result":
-                        ev.pop("thread_id", None)
+                        th = ev.get("thread_id")
+                        if th and th not in known:
+                            ev.pop("thread_id", None)
                 if isinstance(result, dict):
-                    result.pop("thread_id", None)
+                    th = result.get("thread_id")
+                    if th and th not in known:
+                        result.pop("thread_id", None)
+                restored_thread = e.get("thread_id") or (result or {}).get("thread_id")
+                if restored_thread and restored_thread not in known:
+                    restored_thread = None
                 task = Task(
-                    task_id=tid, goal=str(e.get("goal", "")),
+                    task_id=task_id, goal=str(e.get("goal", "")),
                     framework=str(e.get("framework", "langgraph")),
                     model=e.get("model"), max_steps=e.get("max_steps"),
                     status=e["status"], created_at=e.get("created_at") or time.time(),
@@ -284,8 +323,9 @@ class TaskManager:
                     result=result, stream_closed=True,
                 )
                 task.seq = max((int(ev.get("seq", 0)) for ev in task.events), default=0)
-                self._tasks[tid] = task
-                self._order.append(tid)
+                task.thread_id = restored_thread
+                self._tasks[task_id] = task
+                self._order.append(task_id)
             if self._order:
                 logger.info("任务历史已恢复: %d 条 (%s)", len(self._order), self._history_path)
         except Exception as exc:  # noqa: BLE001 — 历史损坏不阻断启动
@@ -404,7 +444,8 @@ class TaskManager:
                     "elapsed_ms": int((task.finished_at - task.started_at) * 1000),
                     "thread_id": task.thread_id,
                 }
-                self._emit(task, "result", **task.result, trace=result.get("trace", []))
+                self._emit(task, "result", **task.result, trace=result.get("trace", []),
+                           metrics=task_metrics(task))
             except TaskCancelled:
                 self._finalize_cancelled(task)
             except Exception as e:  # noqa: BLE001 — 任何异常都转为任务错误
@@ -435,6 +476,7 @@ class TaskManager:
             on_event=on_event, cancel_event=task.cancel_flag,
             approval=on_approval,
             thread_id=task.thread_id,   # 仅 langgraph 支持; 其余框架忽略该参数
+            images=task.images,         # 仅 langgraph 支持; 其余框架忽略该参数
         )
 
     def _execute_mock(self, task: Task, on_event) -> dict:
@@ -456,7 +498,8 @@ class TaskManager:
 
         agent = Agent(llm=ScriptedLLM(script), max_steps=task.max_steps, verbose=False,
                       checkpointer=shared_checkpointer())   # 共享检查点: 支持多轮续跑演示
-        r = agent.run(task.goal, thread_id=task.thread_id, on_event=slow)
+        r = agent.run(task.goal, thread_id=task.thread_id, on_event=slow,
+                      images=task.images)
         return {
             "framework": "langgraph(mock)",
             "goal": task.goal,

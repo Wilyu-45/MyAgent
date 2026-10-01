@@ -225,7 +225,7 @@ async def load_model(model_id: str):
     if not reg.has(model_id):
         raise HTTPException(404, f"Unknown model: {model_id}")
     llm = await reg.acquire(model_id)
-    await reg.release(model_id)
+    reg.release(model_id)
     return {"model": model_id, "loaded": True}
 
 
@@ -285,7 +285,7 @@ async def chat_completions(req: ChatCompletionRequest):
             usage=_extract_usage(result),
         ).model_dump())
     finally:
-        await reg.release(model_id)
+        reg.release(model_id)
 
 
 # ============================================================
@@ -399,7 +399,7 @@ async def _chat_stream(llm, chat_handler, payload: dict, model_id: str, reg: Mod
         yield b"data: [DONE]\n\n"
     finally:
         # 流式结束后归还引用计数
-        await reg.release(model_id)
+        reg.release(model_id)
 
 
 @app.post("/v1/chat/completions/stream")
@@ -473,7 +473,7 @@ async def completions(req: CompletionRequest):
                         yield f"data: {_sjson(obj)}\n\n".encode()
                     yield b"data: [DONE]\n\n"
                 finally:
-                    await reg.release(model_id)
+                    reg.release(model_id)
             return StreamingResponse(gen(), media_type="text/event-stream")
 
         def _run():
@@ -497,7 +497,7 @@ async def completions(req: CompletionRequest):
         # 流式分支里 release 已在 generator 中处理,这里只针对非流式
         # gen() 走 StreamingResponse 后已经接手 release;若没走到 stream 分支,这里兜底
         if not req.model_dump(exclude_none=True).get("stream", False):
-            await reg.release(model_id)
+            reg.release(model_id)
 
 
 # ============================================================

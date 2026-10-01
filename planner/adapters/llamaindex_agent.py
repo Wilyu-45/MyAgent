@@ -14,6 +14,7 @@ from llama_index.core.tools import FunctionTool
 from llama_index.llms.openai_like import OpenAILike
 
 from ..config import settings
+from ._multimodal import dataurl_to_bytes
 from .base import make_result
 from .tool_wrappers import build_typed_tools
 
@@ -36,12 +37,31 @@ def _build_tools(approval: Optional[Callable[[dict], bool]] = None):
     return fts
 
 
+def _build_input(goal: str, images: Optional[list[str]]):
+    """data URL → ChatMessage 多模态输入 (TextBlock + ImageBlock); 无图返回纯文本。
+
+    ImageBlock(url=data URL) 经 llama_index OpenAI 序列化为 image_url content part
+    (llama_index.llms.openai.utils 已支持)。
+    """
+    from llama_index.core.base.llms.types import (
+        ChatMessage, ImageBlock, MessageRole, TextBlock,
+    )
+
+    if not images:
+        return goal
+    blocks: list = [TextBlock(text=goal)]
+    for u in images:
+        blocks.append(ImageBlock(url=u))
+    return ChatMessage(role=MessageRole.USER, blocks=blocks)
+
+
 def run(
     goal: str,
     model: Optional[str] = None,
     max_steps: Optional[int] = None,
     verbose: bool = False,
     approval: Optional[Callable[[dict], bool]] = None,
+    images: Optional[list[str]] = None,
     **kwargs,
 ) -> dict:
     llm = OpenAILike(
@@ -62,7 +82,7 @@ def run(
         )
         # AgentWorkflow.run 是同步方法, 返回可 await 的 WorkflowHandler
         async def _run():
-            handler = agent.run(goal)
+            handler = agent.run(_build_input(goal, images))
             return await handler
 
         result = asyncio.run(_run())

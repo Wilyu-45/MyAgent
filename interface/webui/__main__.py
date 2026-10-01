@@ -1,5 +1,5 @@
 """
-界面服务入口: python -m interface.webui [--host] [--port] [--mock] [--workers N] [--token [TOKEN]] [--open]
+界面服务入口: python -m interface.webui [--host] [--port] [--mock] [--workers N] [--token [TOKEN]] [--open] [--desktop]
 
 示例:
     python -m interface.webui                      # 127.0.0.1:8100 (任务串行)
@@ -7,6 +7,7 @@
     python -m interface.webui --open               # 启动后自动打开浏览器
     python -m interface.webui --mock --open        # Agent 任务离线演示 (无需 modelservice)
     python -m interface.webui --host 0.0.0.0 --token   # 局域网访问 + 随机访问令牌
+    python -m interface.webui --desktop --mock     # 桌面窗口 (pywebview), 离线演示
 """
 from __future__ import annotations
 
@@ -54,9 +55,16 @@ def main() -> None:
     parser.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
     parser.add_argument("--token", nargs="?", const="auto", default=None, metavar="TOKEN",
                         help="访问令牌 (默认未启用): 单独给出 --token 随机生成; --token xxx 指定")
+    parser.add_argument("--desktop", action="store_true",
+                        help="以桌面窗口运行 (pywebview); 忽略 --host/--port/--open, 使用临时空闲端口")
     args = parser.parse_args()
 
     token = _resolve_token(args.token)
+    if args.desktop:
+        from .desktop import run_desktop
+        if token:
+            print(f"[webui] 访问令牌已启用: {token}")
+        sys.exit(run_desktop(mock=args.mock, workers=args.workers, token=token))
     if token:
         print(f"[webui] 访问令牌已启用: {token}")
         print(f"[webui] 本机访问: http://127.0.0.1:{args.port}/?token={token}")

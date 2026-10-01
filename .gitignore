@@ -20,3 +20,4 @@ tools/
 
 # 运行时数据 (任务历史 / 长期记忆)
 memory/*.json
+memory/*.sqlite

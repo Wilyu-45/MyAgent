@@ -49,18 +49,6 @@ number ::= ("-"? ([0-9] | [1-9] [0-9]*)) ("." [0-9]+)? ([eE] [-+]? [0-9]+)? ws
 ws ::= ([ \t\n] ws)?
 '''
 
-_JSON_GRAMMAR = None  # 懒加载: LlamaGrammar.from_string 只做一次
-
-
-def _get_json_grammar():
-    global _JSON_GRAMMAR
-    if _JSON_GRAMMAR is None:
-        from llama_cpp import LlamaGrammar
-
-        _JSON_GRAMMAR = LlamaGrammar.from_string(_JSON_GBNF)
-    return _JSON_GRAMMAR
-
-
 # llama.cpp 0.3.x 旧版函数调用标记: 模型会把函数调用写成纯文本
 #   <tool_call>
 #   <function=NAME>
@@ -185,9 +173,15 @@ class SimpleTextChatHandler:
         parts.append("<|im_start|>assistant\n<think>\n\n</think>\n\n")
         extra_kwargs = {}
         if force_json:
-            # 客户端要求 JSON 输出: 用 GBNF grammar 强制合法 JSON
-            # (llama.cpp 原生 create_completion 不支持 response_format 参数)
-            extra_kwargs["grammar"] = _get_json_grammar()
+            # 客户端要求 JSON 输出。默认仅用提示词约束(零开销):
+            # 实测 GBNF grammar 约束采样在本机慢 ~10x(同长度输出 1985ms vs 246ms,
+            # llama.cpp 的 grammar accept/logit mask 走 CPU 全词表路径),
+            # 语法级强制改为 opt-in(JSON_GRAMMAR_ENFORCE=true)。
+            # 启用时每次请求新建 grammar:LlamaGrammar 推进时有状态,
+            # 跨请求共享单例会在并发下互相污染采样约束。
+            if settings.JSON_GRAMMAR_ENFORCE:
+                from llama_cpp import LlamaGrammar
+                extra_kwargs["grammar"] = LlamaGrammar.from_string(_JSON_GBNF)
             parts.append('只输出一个合法的 JSON 对象,不要输出任何解释、Markdown 代码块或 Schema 定义。\n')
         prompt = "\n".join(parts)
 
@@ -248,6 +242,7 @@ class ModelRegistry:
 
         self._instances: dict[str, Any] = {}     # mid -> Llama
         self._in_flight: dict[str, int] = {}     # mid -> 活跃请求数
+        self._in_flight_lock = threading.Lock()  # 计数增减保护(同步 release 用)
         self._chat_handlers: dict[str, Any] = {}  # mid -> 懒加载的 chat_handler(仅含图请求触发)
         # 单把全局锁,同时保护 _instances / _in_flight 以及加载逻辑
         self._lock = asyncio.Lock()
@@ -369,7 +364,8 @@ class ModelRegistry:
             )
 
         async with self._lock:
-            self._in_flight[model_id] = self._in_flight.get(model_id, 0) + 1
+            with self._in_flight_lock:
+                self._in_flight[model_id] = self._in_flight.get(model_id, 0) + 1
             if model_id in self._instances:
                 return self._instances[model_id]
 
@@ -391,7 +387,8 @@ class ModelRegistry:
                 llm = await self._load(self._configs[model_id])
             except Exception:
                 # 加载失败,回滚引用计数
-                self._in_flight[model_id] -= 1
+                with self._in_flight_lock:
+                    self._in_flight[model_id] -= 1
                 raise
             self._instances[model_id] = llm
             logger.info("模型已就绪(VRAM): %s", model_id)
@@ -416,8 +413,15 @@ class ModelRegistry:
                 return
             await asyncio.sleep(0.25)
 
-    async def release(self, model_id: str) -> None:
-        async with self._lock:
+    def release(self, model_id: str) -> None:
+        """归还引用计数(同步、无 await)。
+        流式响应被客户端中途断开时,生成器 finally 运行在已取消的任务上下文中,
+        旧版 async release 里的 await 会立刻再抛 CancelledError,减计数永远执行
+        不到 → 引用计数泄漏 → 泄漏计数>0 的模型永远不被自动淘汰,跨模型请求在
+        _wait_others_idle 中等到 900s 超时(表现为 load 排队 / warmup:false)。
+        同步实现保证 finally 里的减计数在任何取消/异常路径下必然执行。
+        计数增减都只发生在事件循环线程,threading.Lock 仅为防御性保护。"""
+        with self._in_flight_lock:
             cnt = self._in_flight.get(model_id, 0)
             if cnt > 0:
                 self._in_flight[model_id] = cnt - 1

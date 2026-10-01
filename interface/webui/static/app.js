@@ -5,7 +5,9 @@
  *   chat  — 直连模型对话, 消费 POST 流式响应 (fetch + ReadableStream)
  * 动态文本经 textContent 构建 (防 XSS); Chat 助手回答由 md.js 以 DOM 节点渲染 Markdown。
  * 访问令牌: 服务启用 --token 时, 从 URL ?token= 或 localStorage 取令牌, 自动注入到请求。
- * 对话行即真相 (chatRows): 消息历史在发送时实时派生, 支持回答重试 / 用户消息编辑重发。 */
+ * 对话行即真相 (chatRows): 消息历史在发送时实时派生, 支持回答重试 / 用户消息编辑重发。
+ * 图片附件 (多模态): 两种模式输入区均支持选择/粘贴/拖拽图片 (multimodal.js 纯函数校验
+ * 与 content parts 构建), 随消息以 data URL 内联提交。 */
 
 const $ = (id) => document.getElementById(id);
 
@@ -34,6 +36,9 @@ const seenSeq = new Map();  // taskId -> Set(seq), 去重
 const chatRows = [];        // 对话行 DOM 引用 (历史消息由行实时派生; 服务端无状态)
 let chatBusy = false;
 let chatAbort = null;       // AbortController (停止生成)
+let goalImages = null;      // 任务模式图片附件选择器
+let chatImages = null;      // Chat 模式图片附件选择器
+const imageSupport = new Set();   // 支持图片输入的框架名 (/api/frameworks 的 images 字段)
 
 /* ==================== 小工具 ==================== */
 function el(tag, className, text) {
@@ -48,11 +53,11 @@ function fmtTime(ts) {
 }
 let toastTimer = null;
 function toast(msg) {
-  const t = $("toast");
-  t.textContent = msg;
-  t.classList.add("show");
+  const box = $("toast");
+  box.textContent = t(msg);   // i18n: 中文原文作 key, 动态文案集中在此翻译
+  box.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove("show"), 4000);
+  toastTimer = setTimeout(() => box.classList.remove("show"), 4000);
 }
 function scrollEl(box, force) {
   const near = box.scrollHeight - box.scrollTop - box.clientHeight < 160;
@@ -128,7 +133,117 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btn-chat-send").addEventListener("click", chatSend);
   $("btn-chat-stop").addEventListener("click", chatStop);
   $("btn-chat-clear").addEventListener("click", chatClear);
+  goalImages = makeImagePicker("goal-img-strip", "btn-goal-img", "file-goal", "inp-goal", "btn-goal-shot");
+  chatImages = makeImagePicker("chat-img-strip", "btn-chat-img", "file-chat", "inp-chat", "btn-chat-shot");
+  $("btn-sched-add").addEventListener("click", addSchedule);
+  $("sel-sched-kind").addEventListener("change", schedKindChanged);
+  loadSchedules();
+  $("btn-mem-add").addEventListener("click", addMemory);
+  $("inp-mem-search").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") loadMemory($("inp-mem-search").value.trim());
+  });
+  loadMemory("");
+  $("btn-kb-add").addEventListener("click", () => $("file-kb").click());
+  $("file-kb").addEventListener("change", () => {
+    if ($("file-kb").files.length) uploadKbFiles([...$("file-kb").files]);
+    $("file-kb").value = "";
+  });
+  $("inp-kb-search").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") loadKb($("inp-kb-search").value.trim());
+  });
+  $("btn-theme").addEventListener("click", toggleTheme);
+  $("btn-lang").addEventListener("click", toggleLang);
+  onI18nChange(() => {   // 切换语言: 重渲染动态面板 (静态框架由 applyI18n 覆盖)
+    loadHistory();
+    loadSchedules();
+    loadMemory("");
+    loadKb("");
+    loadMcp();
+    loadTools();
+    refreshHealth();
+  });
+  $("btn-mcp-add").addEventListener("click", addMcp);
+  loadMcp();
 });
+
+/* ==================== 图片附件 (多模态输入) ==================== */
+/* 输入区图片选择器: 点击选择 / 粘贴 / 拖拽 / 屏幕截图, 缩略预览可移除。
+ * 文件读取为 data URL (上限与格式见 multimodal.js), 随消息一并提交。 */
+function makeImagePicker(stripId, btnId, fileId, textareaId, shotBtnId) {
+  const strip = $(stripId), btn = $(btnId), file = $(fileId), ta = $(textareaId);
+  const images = [];
+  function render() {
+    strip.replaceChildren();
+    strip.hidden = images.length === 0;
+    images.forEach((url, i) => {
+      const t = el("div", "img-thumb");
+      const img = document.createElement("img");
+      img.src = url;
+      img.alt = "图片 " + (i + 1);
+      t.appendChild(img);
+      const rm = el("button", "rm", "×");
+      rm.title = "移除此图片";
+      rm.addEventListener("click", () => { images.splice(i, 1); render(); });
+      t.appendChild(rm);
+      strip.appendChild(t);
+    });
+  }
+  function add(url) {
+    if (typeof url !== "string" || !Multimodal.isValidDataUrl(url)) return false;
+    if (images.length >= Multimodal.MAX_IMAGES) { toast("图片数量超限 (最多 4 张)"); return false; }
+    images.push(url);
+    render();
+    return true;
+  }
+  function addFiles(files) {
+    for (const f of Array.from(files || [])) {
+      if (!Multimodal.isSupportedFile(f)) { toast("仅支持 png/jpg/gif/webp 图片"); continue; }
+      if (f.size > Multimodal.MAX_IMAGE_BYTES) { toast("图片过大 (上限 5MB): " + f.name); continue; }
+      if (images.length >= Multimodal.MAX_IMAGES) { toast("图片数量超限 (最多 4 张)"); break; }
+      const r = new FileReader();
+      r.onload = () => {
+        if (typeof r.result === "string" && Multimodal.isValidDataUrl(r.result)) {
+          images.push(r.result);
+          render();
+        } else {
+          toast("图片读取失败: " + f.name);
+        }
+      };
+      r.readAsDataURL(f);
+    }
+  }
+  btn.addEventListener("click", () => file.click());
+  file.addEventListener("change", () => { addFiles(file.files); file.value = ""; });
+  const fromTransfer = (e) => {
+    const fs = Array.from(e.clipboardData?.files || e.dataTransfer?.files || [])
+      .filter((f) => f.type.startsWith("image/"));
+    if (fs.length) { e.preventDefault(); addFiles(fs); }
+  };
+  ta.addEventListener("paste", fromTransfer);
+  ta.addEventListener("dragover", (e) => e.preventDefault());
+  ta.addEventListener("drop", fromTransfer);
+  if (shotBtnId) {
+    $(shotBtnId).addEventListener("click", async () => {
+      const url = await Multimodal.captureScreenshot();
+      if (!url || !add(url)) toast("未获取到屏幕截图 (不支持或已取消)");
+    });
+  }
+  return { images, add, clear: () => { images.length = 0; render(); } };
+}
+
+/* 气泡/卡片内图片缩略条 (只展示, 无移除按钮) */
+function renderImgStrip(images) {
+  const strip = el("div", "img-strip");
+  for (const url of images) {
+    const t = el("div", "img-thumb");
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = "图片";
+    t.appendChild(img);
+    strip.appendChild(t);
+  }
+  return strip;
+}
 
 function bindKeys() {
   for (const id of ["inp-goal", "inp-chat"]) {
@@ -160,15 +275,27 @@ async function loadFrameworks() {
     const { frameworks } = await r.json();
     const sel = $("sel-framework");
     sel.replaceChildren();
+    imageSupport.clear();
     for (const f of frameworks) {
       const opt = el("option", null, f.name + (f.available === false ? " (不可用)" : ""));
       opt.value = f.name;
       opt.title = f.notes || "";
       if (f.available === false) opt.disabled = true;
+      if (f.images) imageSupport.add(f.name);
       sel.appendChild(opt);
     }
     sel.value = "langgraph";
+    sel.addEventListener("change", syncImageButtons);
+    syncImageButtons();
   } catch { if (!authBlocked) toast("加载框架清单失败"); }
+}
+
+/* 所选框架不支持图片时禁用任务附件按钮 (Chat 直连 modelservice, 不受框架约束) */
+function syncImageButtons() {
+  const ok = imageSupport.has($("sel-framework").value || "langgraph");
+  for (const id of ["btn-goal-img", "btn-goal-shot"]) {
+    $(id).disabled = !ok;
+  }
 }
 
 async function loadModels() {
@@ -228,7 +355,7 @@ async function refreshHealth() {
     if (r.status === 401) {   // 令牌无效/缺失: 状态灯明确提示 (toast 由 apiFetch 节流)
       msOnline = false;
       $("ms-dot").className = "dot off";
-      $("ms-text").textContent = "需要访问令牌";
+      $("ms-text").textContent = t("需要访问令牌");
       return;
     }
     const h = await r.json();
@@ -236,13 +363,13 @@ async function refreshHealth() {
     const online = !!(h.modelservice && h.modelservice.online);
     if (h.mock) {
       dot.className = "dot mock";
-      txt.textContent = "离线演示模式";
+      txt.textContent = t("离线演示模式");
     } else if (online) {
       dot.className = "dot on";
-      txt.textContent = "模型服务在线";
+      txt.textContent = t("模型服务在线");
     } else {
       dot.className = "dot off";
-      txt.textContent = "模型服务离线";
+      txt.textContent = t("模型服务离线");
     }
     if (online !== msOnline) {   // 上下线翻转: 刷新模型清单 (profile 过滤依赖它)
       msOnline = online;
@@ -250,16 +377,16 @@ async function refreshHealth() {
     }
     const env = $("env");
     env.replaceChildren();
-    env.appendChild(el("div", "muted", "模式: " + (h.mock ? "离线演示 (mock)" : "在线")));
+    env.appendChild(el("div", "muted", t("模式: {0}", h.mock ? t("离线演示 (mock)") : t("在线"))));
     env.appendChild(el("div", "muted",
-      "已加载模型: " + ((h.modelservice && h.modelservice.loaded || []).join(", ") || "无")));
+      t("已加载模型: {0}", (h.modelservice && h.modelservice.loaded || []).join(", ") || t("无"))));
     const running = Array.isArray(h.running) ? h.running.length : (h.running ? 1 : 0);
     env.appendChild(el("div", "muted",
-      "排队中: " + (h.queue_len || 0) + " · 运行中: " + running));
+      t("排队中: {0} · 运行中: {1}", h.queue_len || 0, running)));
   } catch {
     msOnline = false;
     $("ms-dot").className = "dot off";
-    $("ms-text").textContent = "界面服务无响应";
+    $("ms-text").textContent = t("界面服务无响应");
   }
 }
 
@@ -270,20 +397,417 @@ async function loadHistory() {
     const box = $("history");
     box.replaceChildren();
     if (!tasks || !tasks.length) {
-      box.appendChild(el("div", "muted", "暂无任务"));
+      box.appendChild(el("div", "muted", t("暂无任务")));
       return;
     }
-    for (const t of tasks) {
-      const m = STATUS_META[t.status] || { icon: "•" };
+    for (const task of tasks) {
+      const m = STATUS_META[task.status] || { icon: "•" };
       const item = el("div", "item");
-      item.appendChild(el("div", "row", `${m.icon} ${t.framework} · ${fmtTime(t.created_at)}`
-        + (t.steps ? ` · ${t.steps} 步` : "")));
-      item.appendChild(el("div", "goal muted", t.goal));
-      item.title = t.goal;
-      item.addEventListener("click", () => viewTask(t.task_id));
+      const dur = task.metrics && task.metrics.duration_ms
+        ? ` · ${(task.metrics.duration_ms / 1000).toFixed(1)}s` : "";
+      item.appendChild(el("div", "row", `${m.icon} ${task.framework} · ${fmtTime(task.created_at)}`
+        + (task.steps ? ` · ${task.steps} ${t("步")}` : "") + dur));
+      item.appendChild(el("div", "goal muted", task.goal));
+      item.title = task.goal;
+      item.addEventListener("click", () => viewTask(task.task_id));
       box.appendChild(item);
     }
   } catch { /* 忽略 */ }
+}
+
+/* ==================== 定时任务 (侧栏) ==================== */
+function fmtWhen(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  const hm = d.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" });
+  const today = new Date();
+  return (d.toDateString() === today.toDateString() ? "今天 " : `${d.getMonth() + 1}/${d.getDate()} `) + hm;
+}
+
+async function loadSchedules() {
+  try {
+    const r = await apiFetch("/api/schedules");
+    if (r.status === 401) return;
+    const d = await r.json();
+    renderSchedules(d.schedules || []);
+  } catch { /* 忽略 */ }
+}
+
+function renderSchedules(items) {
+  const box = $("schedules");
+  box.replaceChildren();
+  if (!items.length) {
+    box.appendChild(el("div", "muted", t("暂无定时任务")));
+    return;
+  }
+  for (const s of items) {
+    const item = el("div", "item");
+    item.appendChild(el("div", "row",
+      `${s.enabled ? "🟢" : "⏸"} ${s.framework} · ${t("已跑 {0} 次 · 下次 {1}", s.run_count, fmtWhen(s.next_run))}`));
+    item.appendChild(el("div", "goal muted", s.goal));
+    item.title = s.goal;
+    const acts = el("div", "sched-acts");
+    const toggle = el("button", "mini", s.enabled ? t("暂停") : t("启用"));
+    toggle.title = s.enabled ? t("暂停该计划 (不删除)") : t("重新启用该计划");
+    toggle.addEventListener("click", async () => {
+      try {
+        const r = await apiFetch(`/api/schedules/${s.schedule_id}/toggle`, { method: "POST" });
+        if (!r.ok) { toast("操作失败"); return; }
+        loadSchedules();
+      } catch { toast("操作失败"); }
+    });
+    const now = el("button", "mini", t("▶ 立即运行"));
+    now.title = t("立刻提交一次该任务 (不影响计划节奏)");
+    now.addEventListener("click", async () => {
+      if (currentTaskId) { toast("已有任务在运行, 请等待完成或取消"); return; }
+      try {
+        const r = await apiFetch(`/api/schedules/${s.schedule_id}/run-now`, { method: "POST" });
+        const d = await r.json();
+        if (!r.ok) { toast((d.error && d.error.message) || "触发失败"); return; }
+        createCard(d.task_id, { goal: s.goal, framework: s.framework });
+        currentTaskId = d.task_id;
+        setRunning(true);
+        subscribe(d.task_id, 0);
+        loadHistory();
+      } catch (e) { toast(t("触发失败: {0}", e.message)); }
+    });
+    const del = el("button", "mini", "✕");
+    del.title = t("删除该计划");
+    del.addEventListener("click", async () => {
+      if (!confirm(t("删除该定时任务?"))) return;
+      try {
+        const r = await apiFetch(`/api/schedules/${s.schedule_id}`, { method: "DELETE" });
+        if (!r.ok) { toast("删除失败"); return; }
+        loadSchedules();
+      } catch { toast("删除失败"); }
+    });
+    acts.append(toggle, now, del);
+    item.appendChild(acts);
+    box.appendChild(item);
+  }
+}
+
+function schedKindChanged() {
+  const v = { interval: "30", daily: "09:30", cron: "*/30 * * * *" }[$("sel-sched-kind").value] || "";
+  $("inp-sched-value").value = v;
+}
+
+async function addSchedule() {
+  const goal = $("inp-sched-goal").value.trim();
+  if (!goal) { toast("请输入定时任务目标"); return; }
+  const kind = $("sel-sched-kind").value;
+  const v = $("inp-sched-value").value.trim();
+  let schedule = null;
+  if (kind === "interval") {
+    const minutes = parseInt(v, 10);
+    if (!minutes || minutes < 1) { toast("请输入分钟数 (≥1)"); return; }
+    schedule = { kind, minutes };
+  } else if (kind === "daily") {
+    if (!/^\d{2}:\d{2}$/.test(v)) { toast("请输入 HH:MM 格式时间"); return; }
+    schedule = { kind, time: v };
+  } else {
+    if (!v) { toast("请输入 cron 表达式 (分 时 日 月 周)"); return; }
+    schedule = { kind, expr: v };
+  }
+  try {
+    const r = await apiFetch("/api/schedules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        goal,
+        framework: $("sel-framework").value || "langgraph",
+        schedule,
+      }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      toast((d.error && d.error.message) || "创建失败");
+      return;
+    }
+    $("inp-sched-goal").value = "";
+    loadSchedules();
+    toast("定时任务已创建");
+  } catch (e) { toast(t("创建失败: {0}", e.message)); }
+}
+
+/* ==================== 长期记忆 (侧栏) ==================== */
+/* 查看全部分类 / 搜索 (?q=) / 添加 / 删除分类; 条目由 Agent 工具与 Chat 注入共用 */
+async function loadMemory(q) {
+  try {
+    const r = await apiFetch("/api/memory" + (q ? `?q=${encodeURIComponent(q)}` : ""));
+    if (r.status === 401) return;
+    renderMemory(await r.json());
+  } catch { /* 忽略 */ }
+}
+
+function renderMemory(d) {
+  const box = $("memory");
+  box.replaceChildren();
+  if (d.mode === "search") {
+    const hits = d.results || [];
+    if (!hits.length) { box.appendChild(el("div", "muted", t("无匹配记忆"))); return; }
+    for (const h of hits) {
+      const item = el("div", "item");
+      item.appendChild(el("div", "row", `🔎 ${h.key} · ${h.ts}`));
+      const v = el("div", "goal muted", h.value);
+      v.title = h.value;
+      item.appendChild(v);
+      box.appendChild(item);
+    }
+    return;
+  }
+  const stats = d.stats || [];
+  if (!stats.length) {
+    box.appendChild(el("div", "muted", t("暂无记忆 (添加后任务与 Chat 自动参考)")));
+    return;
+  }
+  for (const s of stats) {
+    const item = el("div", "item");
+    item.appendChild(el("div", "row", `🗂 ${s.key} · ${t("{0} 条", s.count)}`));
+    const last = el("div", "goal muted", s.latest_value);
+    last.title = s.latest_value;
+    item.appendChild(last);
+    const acts = el("div", "sched-acts");
+    const del = el("button", "mini", t("删除"));
+    del.title = t("删除该分类全部记忆");
+    del.addEventListener("click", async () => {
+      try {
+        const r = await apiFetch(`/api/memory/${encodeURIComponent(s.key)}`, { method: "DELETE" });
+        if (!r.ok) { toast("删除失败"); return; }
+        loadMemory($("inp-mem-search").value.trim());
+        toast("记忆已删除");
+      } catch { toast("删除失败"); }
+    });
+    acts.appendChild(del);
+    item.appendChild(acts);
+    box.appendChild(item);
+  }
+}
+
+async function addMemory() {
+  const value = $("inp-mem-value").value.trim();
+  if (!value) { toast("请输入要记录的内容"); return; }
+  const key = $("inp-mem-key").value.trim() || "default";
+  try {
+    const r = await apiFetch("/api/memory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key, value }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      toast((d.error && d.error.message) || "写入失败");
+      return;
+    }
+    $("inp-mem-key").value = "";
+    $("inp-mem-value").value = "";
+    loadMemory("");
+    toast("已写入长期记忆");
+  } catch (e) { toast(t("写入失败: {0}", e.message)); }
+}
+
+/* ==================== 知识库 (侧栏, RAG) ==================== */
+/* 导入 txt/md/pdf → 分块 BM25 建索; 模型经 search_knowledge 工具检索 */
+async function loadKb(q) {
+  try {
+    const r = await apiFetch("/api/kb" + (q ? `/search?q=${encodeURIComponent(q)}` : ""));
+    if (r.status === 401) return;
+    renderKb(await r.json(), !!q);
+  } catch { /* 忽略 */ }
+}
+
+function renderKb(d, searching) {
+  const box = $("kb");
+  box.replaceChildren();
+  if (searching) {
+    const hits = d.results || [];
+    if (!hits.length) { box.appendChild(el("div", "muted", t("无匹配内容"))); return; }
+    for (const h of hits) {
+      const item = el("div", "item");
+      item.appendChild(el("div", "row", t("🔎 《{0}》· 相关度 {1}", h.doc_name, h.score)));
+      const v = el("div", "goal muted", h.text.slice(0, 140));
+      v.title = h.text;
+      item.appendChild(v);
+      box.appendChild(item);
+    }
+    return;
+  }
+  const docs = d.docs || [];
+  if (!docs.length) {
+    box.appendChild(el("div", "muted", t("知识库为空 (导入文档后任务可检索引用)")));
+    return;
+  }
+  box.appendChild(el("div", "muted", t("共 {0} 篇文档 · {1} 个片段", d.doc_count, d.chunk_count)));
+  for (const doc of docs) {
+    const item = el("div", "item");
+    item.appendChild(el("div", "row", `📄 ${doc.name}`));
+    const v = el("div", "goal muted", `${doc.kind} · ${doc.chunks} ${t("块")} · ${doc.chars} ${t("字")} · ${doc.added_at}`);
+    v.title = doc.name;
+    item.appendChild(v);
+    const acts = el("div", "sched-acts");
+    const del = el("button", "mini", t("删除"));
+    del.title = t("从知识库移除该文档");
+    del.addEventListener("click", async () => {
+      try {
+        const r = await apiFetch(`/api/kb/${encodeURIComponent(doc.id)}`, { method: "DELETE" });
+        if (!r.ok) { toast("删除失败"); return; }
+        loadKb($("inp-kb-search").value.trim());
+        toast("文档已删除");
+      } catch { toast("删除失败"); }
+    });
+    acts.appendChild(del);
+    item.appendChild(acts);
+    box.appendChild(item);
+  }
+}
+
+function bytesToB64(bytes) {
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+async function uploadKbFiles(files) {
+  for (const f of files) {
+    const ext = (f.name.split(".").pop() || "").toLowerCase();
+    try {
+      const body = { name: f.name };
+      if (ext === "pdf") {
+        body.content_b64 = bytesToB64(new Uint8Array(await f.arrayBuffer()));
+      } else {
+        body.content = await f.text();
+      }
+      const r = await apiFetch("/api/kb", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        toast(t("{0}: {1}", f.name, (d.error && d.error.message) || t("导入失败")));
+        continue;
+      }
+      toast(t("《{0}》已导入知识库", f.name));
+    } catch (e) { toast(t("{0} 导入失败: {1}", f.name, e.message)); }
+  }
+  loadKb($("inp-kb-search").value.trim());
+}
+
+/* ==================== MCP / 插件市场 (侧栏) ==================== */
+/* 已配置服务器 + 内置市场目录; 安装后 mcp 框架任务自动加载 */
+async function loadMcp() {
+  try {
+    const r = await apiFetch("/api/mcp");
+    if (r.status === 401) return;
+    renderMcp(await r.json());
+  } catch { /* 忽略 */ }
+}
+
+function renderMcp(d) {
+  const box = $("mcp");
+  box.replaceChildren();
+  const servers = d.servers || [];
+  if (!servers.length) {
+    box.appendChild(el("div", "muted", t("未添加服务器 (mcp 任务用内置 local)")));
+  }
+  for (const s of servers) {
+    const item = el("div", "item");
+    item.appendChild(el("div", "row",
+      `${s.enabled ? "🟢" : "⏸"} ${s.name} ${t(s.source === "catalog" ? "· 市场" : "· 自定义")}`));
+    const v = el("div", "goal muted", `${s.command} ${(s.args || []).join(" ")}`.slice(0, 120));
+    v.title = `${s.command} ${(s.args || []).join(" ")}`;
+    item.appendChild(v);
+    const acts = el("div", "sched-acts");
+    const test = el("button", "mini", t("测试"));
+    test.title = t("拉起该服务器并发现工具 (stdio 连接测试)");
+    test.addEventListener("click", async () => {
+      test.disabled = true; test.textContent = "…";
+      try {
+        const r = await apiFetch(`/api/mcp/${encodeURIComponent(s.name)}/test`, { method: "POST" });
+        const dd = await r.json().catch(() => ({}));
+        if (dd.ok) toast(t("✓ {0}: 发现 {1} 个工具 ({2})", s.name, dd.tools.length,
+                           dd.tools.map(x => x.name).slice(0, 6).join(", ")));
+        else toast(t("✗ {0}: {1}", s.name, dd.error || t("连接失败")));
+      } catch { toast("连接测试失败"); }
+      test.disabled = false; test.textContent = t("测试");
+    });
+    const tog = el("button", "mini", s.enabled ? t("停用") : t("启用"));
+    tog.addEventListener("click", async () => {
+      try {
+        const r = await apiFetch(`/api/mcp/${encodeURIComponent(s.name)}/toggle`, { method: "POST" });
+        if (!r.ok) { toast("操作失败"); return; }
+        loadMcp();
+      } catch { toast("操作失败"); }
+    });
+    const del = el("button", "mini", t("删除"));
+    del.addEventListener("click", async () => {
+      try {
+        const r = await apiFetch(`/api/mcp/${encodeURIComponent(s.name)}`, { method: "DELETE" });
+        if (!r.ok) { toast("删除失败"); return; }
+        loadMcp();
+        toast("服务器已删除");
+      } catch { toast("删除失败"); }
+    });
+    acts.append(test, tog, del);
+    item.appendChild(acts);
+    box.appendChild(item);
+  }
+
+  const cat = $("mcp-catalog");
+  cat.replaceChildren();
+  cat.appendChild(el("div", "muted", t("—— 市场目录 ——")));
+  for (const c of d.catalog || []) {
+    const item = el("div", "item");
+    item.appendChild(el("div", "row", `🧩 ${c.title} · ${c.needs}`));
+    const v = el("div", "goal muted", c.description);
+    v.title = `${c.command} ${(c.args || []).join(" ")}`;
+    item.appendChild(v);
+    const acts = el("div", "sched-acts");
+    if (c.installed) {
+      acts.appendChild(el("span", "muted", t("已安装")));
+    } else {
+      const btn = el("button", "mini", t("安装"));
+      btn.title = t("加入已配置列表 (mcp 框架任务自动加载)");
+      btn.addEventListener("click", async () => {
+        try {
+          const r = await apiFetch("/api/mcp/install", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: c.id }),
+          });
+          const dd = await r.json().catch(() => ({}));
+          if (!r.ok) { toast((dd.error && dd.error.message) || t("安装失败")); return; }
+          loadMcp();
+          toast(t("「{0}」已安装", c.title));
+        } catch { toast("安装失败"); }
+      });
+      acts.appendChild(btn);
+    }
+    item.appendChild(acts);
+    cat.appendChild(item);
+  }
+}
+
+async function addMcp() {
+  const name = $("inp-mcp-name").value.trim();
+  const command = $("inp-mcp-cmd").value.trim();
+  if (!name || !command) { toast("名称与命令不能为空"); return; }
+  const args = $("inp-mcp-args").value.trim().split(/\s+/).filter(Boolean);
+  try {
+    const r = await apiFetch("/api/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, command, args, env: {} }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast((d.error && d.error.message) || "添加失败"); return; }
+    $("inp-mcp-name").value = ""; $("inp-mcp-cmd").value = ""; $("inp-mcp-args").value = "";
+    loadMcp();
+    toast(t("MCP 服务器「{0}」已添加", name));
+  } catch { toast("添加失败"); }
 }
 
 /* ==================== Agent 任务: 提交 / 取消 ==================== */
@@ -299,7 +823,7 @@ async function submitTask(body) {
     toast((data.error && data.error.message) || "提交失败");
     return false;
   }
-  createCard(data.task_id, { goal: body.goal, framework: body.framework });
+  createCard(data.task_id, { goal: body.goal, framework: body.framework, images: body.images });
   currentTaskId = data.task_id;
   setRunning(true);
   subscribe(data.task_id, 0);
@@ -311,6 +835,7 @@ async function send() {
   if (currentTaskId) { toast("已有任务在运行, 请等待完成或取消"); return; }
   const goal = $("inp-goal").value.trim();
   if (!goal) { toast("请输入任务目标"); return; }
+  const images = goalImages ? goalImages.images.slice() : [];
   $("btn-send").disabled = true;
   let ok = false;
   try {
@@ -319,12 +844,14 @@ async function send() {
       framework: $("sel-framework").value || "langgraph",
       model: $("sel-model").value || null,
       max_steps: parseInt($("inp-steps").value, 10) || 8,
+      images: images.length ? images : undefined,
     });
   } catch (e) {
     toast("提交失败: " + e.message);
   }
   if (ok) {
     $("inp-goal").value = "";
+    goalImages.clear();
   } else {
     $("btn-send").disabled = false;   // 失败: 恢复发送
   }
@@ -334,13 +861,13 @@ async function cancelCurrent() {
   if (!currentTaskId) return;
   const btn = $("btn-cancel");
   btn.disabled = true;
-  btn.textContent = "取消中…";
+  btn.textContent = t("取消中…");
   try {
     const r = await apiFetch(`/api/tasks/${currentTaskId}/cancel`, { method: "POST" });
     const d = await r.json();
     if (!d.cancelled) toast("任务已结束, 无需取消");
   } catch { toast("取消失败"); }
-  setTimeout(() => { btn.disabled = false; btn.textContent = "■ 取消"; }, 1500);
+  setTimeout(() => { btn.disabled = false; btn.textContent = t("■ 取消"); }, 1500);
 }
 
 function setRunning(running) {
@@ -390,6 +917,10 @@ function createCard(taskId, info) {
   const wrap = el("div", "task");
   const user = el("div", "msg-user");
   user.appendChild(el("span", "who", "🧑"));
+  if (info.images && info.images.length) user.appendChild(renderImgStrip(info.images));
+  if (info.imageCount && !(info.images && info.images.length)) {   // 历史回看: 图片数据不落盘, 仅记张数
+    user.appendChild(el("span", "img-badge", `🖼 ${info.imageCount}`));
+  }
   user.appendChild(el("span", "txt", info.goal));
   wrap.appendChild(user);
 
@@ -420,7 +951,7 @@ function createCard(taskId, info) {
 function setBadge(card, status, extra) {
   const m = STATUS_META[status] || { cls: "", icon: "•", text: status };
   card.badge.className = "badge " + m.cls;
-  card.badge.textContent = m.icon + " " + m.text + (extra ? ` · ${extra}` : "");
+  card.badge.textContent = m.icon + " " + t(m.text) + (extra ? ` · ${extra}` : "");
 }
 
 function stopTimer(card) {
@@ -522,12 +1053,22 @@ function openContinue(card, threadId, row) {
 }
 
 /* ==================== Agent 任务: 事件渲染 ==================== */
+function fmtMetrics(m) {
+  const parts = [];
+  if (m.duration_ms) parts.push(t("总耗时 {0}s", (m.duration_ms / 1000).toFixed(1)));
+  if (m.queue_ms > 0) parts.push(t("排队 {0}s", (m.queue_ms / 1000).toFixed(1)));
+  if (m.thoughts) parts.push(t("{0} 步思考", m.thoughts));
+  if (m.tool_calls) parts.push(t("{0} 次工具调用", m.tool_calls));
+  if (m.events) parts.push(t("{0} 个事件", m.events));
+  return "📊 " + (parts.join(" · ") || t("无统计"));
+}
+
 function renderEvent(card, ev) {
   const tl = card.timeline;
   switch (ev.type) {
     case "queued": {
       const pos = ev.queue_position || 0;
-      setBadge(card, "queued", pos > 0 ? `前面还有 ${pos} 个` : "即将开始");
+      setBadge(card, "queued", pos > 0 ? t("前面还有 {0} 个", pos) : t("即将开始"));
       break;
     }
     case "started": {
@@ -538,10 +1079,10 @@ function renderEvent(card, ev) {
         if (card.live) setBadge(card, "running", `${Math.round((Date.now() - t0) / 1000)}s`);
       }, 1000);
       if (ev.mock && !card.wrap.querySelector(".tag")) {
-        card.wrap.querySelector(".card-head").appendChild(el("span", "tag", "离线演示"));
+        card.wrap.querySelector(".card-head").appendChild(el("span", "tag", t("离线演示")));
       }
       tl.appendChild(el("div", "ev log",
-        `开始执行 · ${ev.framework || ""}${ev.model ? " · " + ev.model : ""}`));
+        t("开始执行 · {0}", (ev.framework || "") + (ev.model ? " · " + ev.model : ""))));
       break;
     }
     case "thought": {
@@ -550,7 +1091,7 @@ function renderEvent(card, ev) {
       row.appendChild(el("span", "txt", ev.thought || ev.content || ""));
       if (ev.thought && ev.content && String(ev.content).trim() !== String(ev.thought).trim()) {
         const d = el("details", "raw");
-        d.appendChild(el("summary", null, "原始输出"));
+        d.appendChild(el("summary", null, t("原始输出")));
         d.appendChild(el("pre", null, ev.content));
         row.appendChild(d);
       }
@@ -563,7 +1104,7 @@ function renderEvent(card, ev) {
       row.appendChild(el("code", null, ev.name || "?"));
       const args = JSON.stringify(ev.args || {});
       if (args && args !== "{}") row.appendChild(el("span", "args", args));
-      row.appendChild(el("span", "step", `第 ${ev.step} 步`));
+      row.appendChild(el("span", "step", t("第 {0} 步", ev.step)));
       tl.appendChild(row);
       break;
     }
@@ -571,7 +1112,7 @@ function renderEvent(card, ev) {
       const content = String(ev.content === undefined ? "" : ev.content);
       const d = el("details", "result");
       d.appendChild(el("summary", null,
-        `结果${ev.name ? " · " + ev.name : ""} (${content.length} 字符)`));
+        t("结果{0} ({1} 字符)", ev.name ? " · " + ev.name : "", content.length)));
       d.appendChild(el("pre", null, content));
       const row = el("div", "ev result");
       row.appendChild(d);
@@ -588,7 +1129,8 @@ function renderEvent(card, ev) {
       setBadge(card, st, ev.elapsed_ms ? (ev.elapsed_ms / 1000).toFixed(1) + "s" : null);
       const cls = st === "finished" ? "final"
         : (st === "max_steps_exceeded" ? "final warn" : "final err");
-      tl.appendChild(el("div", cls, ev.final_answer || "(无答复)"));
+      tl.appendChild(el("div", cls, ev.final_answer || t("(无答复)")));
+      if (ev.metrics) tl.appendChild(el("div", "ev log", fmtMetrics(ev.metrics)));
       if (ev.thread_id) appendContinue(card, ev.thread_id);   // 多轮续跑入口
       finishCard(card);
       break;
@@ -596,31 +1138,31 @@ function renderEvent(card, ev) {
     case "error": {
       stopTimer(card);
       setBadge(card, "error");
-      tl.appendChild(el("div", "final err", ev.message || "执行异常"));
+      tl.appendChild(el("div", "final err", ev.message || t("执行异常")));
       finishCard(card);
       break;
     }
     case "cancelled": {
       stopTimer(card);
       setBadge(card, "cancelled");
-      tl.appendChild(el("div", "ev log", "任务已取消"));
+      tl.appendChild(el("div", "ev log", t("任务已取消")));
       break;
     }
     case "approval_request": {
       const row = el("div", "ev approval");
       row.appendChild(el("span", "ic", "🛡️"));
       const body = el("div", "approval-body");
-      body.appendChild(el("div", "approval-title", "高风险操作请求确认"));
+      body.appendChild(el("div", "approval-title", t("高风险操作请求确认")));
       body.appendChild(el("code", "approval-cmd", ev.detail || ""));
       const btns = el("div", "approval-btns");
-      const ok = el("button", "ok", "批准执行");
-      const no = el("button", "no", "拒绝");
+      const ok = el("button", "ok", t("批准执行"));
+      const no = el("button", "no", t("拒绝"));
       ok.addEventListener("click", () => decideApproval(card, ev.approval_id, true, row));
       no.addEventListener("click", () => decideApproval(card, ev.approval_id, false, row));
       btns.appendChild(ok);
       btns.appendChild(no);
       body.appendChild(btns);
-      body.appendChild(el("div", "approval-hint", "等待确认中, 超时将自动拒绝"));
+      body.appendChild(el("div", "approval-hint", t("等待确认中, 超时将自动拒绝")));
       row.appendChild(body);
       tl.appendChild(row);
       card.approvals.set(ev.approval_id, row);
@@ -631,15 +1173,15 @@ function renderEvent(card, ev) {
       if (row) {
         card.approvals.delete(ev.approval_id);
         const cls = ev.timed_out ? "timeout" : (ev.approved ? "ok" : "no");
-        const text = ev.timed_out ? "⏱ 超时自动拒绝"
-          : (ev.approved ? "✔ 已批准执行" : "✘ 已拒绝执行");
+        const text = ev.timed_out ? t("⏱ 超时自动拒绝")
+          : (ev.approved ? t("✔ 已批准执行") : t("✘ 已拒绝执行"));
         resolveApprovalRow(row, cls, text);
       }
       break;
     }
     case "close": {
       for (const row of card.approvals.values()) {   // 残留的待审批: 标记失效
-        resolveApprovalRow(row, "stale", "已失效 (任务已结束)");
+        resolveApprovalRow(row, "stale", t("已失效 (任务已结束)"));
       }
       card.approvals.clear();
       finishCard(card);
@@ -663,7 +1205,8 @@ async function viewTask(taskId) {
     snap = await r.json();
   } catch { toast("加载任务失败"); return; }
 
-  const card = createCard(taskId, { goal: snap.goal, framework: snap.framework });
+  const card = createCard(taskId, { goal: snap.goal, framework: snap.framework,
+                                    imageCount: snap.image_count });
   card.live = false;   // 回放期间不驱动 timer
   let lastSeq = 0;
   const seen = new Set();
@@ -694,25 +1237,31 @@ function parseFrame(frame) {
   try { return JSON.parse(data); } catch { return null; }
 }
 
-function appendChatRow(role, who, text) {
+function appendChatRow(role, who, text, images) {
   const hint = $("chat-hint");
   if (hint) hint.remove();
   const row = el("div", "bubble-row " + role);
   row._role = role;                       // 行即真相: 供 buildHistory 派生
   row._content = text;
+  row._images = (role === "user" && images && images.length) ? images.slice() : [];
   row.appendChild(el("span", "who", who));
-  const b = el("div", "bubble", role === "user" ? text : null);
-  if (role === "assistant") b.classList.add("md");
+  const b = el("div", "bubble");
+  if (role === "user") {
+    if (row._images.length) b.appendChild(renderImgStrip(row._images));
+    b.appendChild(document.createTextNode(text));
+  } else {
+    b.classList.add("md");
+  }
   row.appendChild(b);
   const acts = el("div", "msg-actions"); // hover 显示的行操作
   if (role === "user") {
-    const ed = el("button", "mini", "✎ 编辑");
-    ed.title = "编辑并重发 (丢弃此消息之后的对话)";
+    const ed = el("button", "mini", t("✎ 编辑"));
+    ed.title = t("编辑并重发 (丢弃此消息之后的对话)");
     ed.addEventListener("click", () => chatEditStart(row));
     acts.appendChild(ed);
   } else {
-    const rt = el("button", "mini", "↻ 重试");
-    rt.title = "重新生成此回答 (丢弃此回答之后的对话)";
+    const rt = el("button", "mini", t("↻ 重试"));
+    rt.title = t("重新生成此回答 (丢弃此回答之后的对话)");
     rt.addEventListener("click", () => chatRetry(row));
     acts.appendChild(rt);
   }
@@ -723,11 +1272,17 @@ function appendChatRow(role, who, text) {
   return b;
 }
 
-/* 由对话行派生发送给模型的消息列表 (空内容行不入历史: 出错/无输出停止) */
+/* 由对话行派生发送给模型的消息列表 (空内容行不入历史: 出错/无输出停止)。
+ * 用户行带图片时派生为多模态 content parts (text + image_url)。 */
 function buildHistory() {
   const hist = [];
   for (const r of chatRows) {
-    if (r._content) hist.push({ role: r._role, content: r._content });
+    if (!r._content) continue;
+    if (r._role === "user" && r._images && r._images.length) {
+      hist.push({ role: r._role, content: Multimodal.contentParts(r._content, r._images) });
+    } else {
+      hist.push({ role: r._role, content: r._content });
+    }
   }
   return hist;
 }
@@ -769,8 +1324,10 @@ async function chatSend() {
   if (!chatReady()) return;
   const txt = $("inp-chat").value.trim();
   if (!txt) { toast("请输入消息"); return; }
+  const imgs = chatImages ? chatImages.images.slice() : [];
   $("inp-chat").value = "";
-  appendChatRow("user", "🧑", txt);
+  chatImages.clear();
+  appendChatRow("user", "🧑", txt, imgs);
   await streamAssistant();
 }
 
@@ -781,6 +1338,7 @@ async function streamAssistant() {
   const row = chatRows[chatRows.length - 1];
   bubble.classList.add("typing");
   let acc = "";
+  let lastUsage = null;   // done 事件携带的 token 用量 (服务不支持时缺省)
   const ctrl = new AbortController();
   chatAbort = ctrl;
   try {
@@ -812,9 +1370,11 @@ async function streamAssistant() {
           bubble.classList.remove("typing");
           if (!acc) {
             bubble.classList.add("err");
-            bubble.textContent = ev.message || "对话出错";
+            bubble.textContent = ev.message || t("对话出错");
           }
           toast(ev.message || "对话出错");
+        } else if (ev.type === "done") {
+          lastUsage = ev.usage || null;
         }
       }
     }
@@ -824,8 +1384,8 @@ async function streamAssistant() {
       bubble.classList.add("stopped");
     } else {
       bubble.classList.add("err");
-      if (!acc) bubble.textContent = "（请求失败）";
-      toast("对话失败: " + e.message);
+      if (!acc) bubble.textContent = t("（请求失败）");
+      toast(t("对话失败: {0}", e.message));
     }
   } finally {
     if (mdRaf) { cancelAnimationFrame(mdRaf); mdRaf = null; }
@@ -833,6 +1393,10 @@ async function streamAssistant() {
     bubble.classList.remove("typing");
     row._content = acc;                      // 记录内容: 派生历史 / 重试编辑截断依据
     if (acc) Markdown.render(bubble, acc);   // 结束态最终渲染一次
+    if (lastUsage && (lastUsage.prompt_tokens || lastUsage.completion_tokens)) {
+      bubble.appendChild(el("div", "chat-usage",
+        t("⚙ {0} 输入 / {1} 输出 tokens", lastUsage.prompt_tokens ?? "–", lastUsage.completion_tokens ?? "–")));
+    }
     setChatBusy(false);
     chatAbort = null;
     scrollChat(false);
@@ -870,7 +1434,7 @@ function chatEditStart(row) {
     if (!chatReady()) return;
     close();
     truncateChat(row);                       // 丢弃此消息及其后全部对话
-    appendChatRow("user", "🧑", txt);
+    appendChatRow("user", "🧑", txt, row._images);   // 编辑仅改文字, 保留原附件
     streamAssistant();
   };
   save.addEventListener("click", done);
@@ -894,8 +1458,8 @@ function chatClear() {
   box.replaceChildren();
   const hint = el("div", "empty-hint");
   hint.id = "chat-hint";
-  hint.appendChild(document.createTextNode("与本地模型直接对话（使用 "));
+  hint.appendChild(document.createTextNode(t("hint.chat.pre")));
   hint.appendChild(el("code", null, "chat"));
-  hint.appendChild(document.createTextNode(" 配置模型，不经过 Agent 编排）"));
+  hint.appendChild(document.createTextNode(t("hint.chat.post")));
   box.appendChild(hint);
 }

@@ -9,6 +9,7 @@ interface.webui — Web 交互界面 (用户交互层)
     python -m interface.webui            # http://127.0.0.1:8100
     python -m interface.webui --mock     # Agent 任务离线演示 (不依赖模型服务)
     python -m interface.webui --token    # 启用访问令牌 (局域网访问 --host 0.0.0.0 必配)
+    python -m interface.webui --desktop  # 桌面窗口运行 (pywebview, 临时空闲端口)
 """
 from .app import create_app
 
