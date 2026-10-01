@@ -26,6 +26,8 @@
   <label class="agent-only"><span data-i18n="label.steps">步数</span> <input id="inp-steps" type="number" value="8" min="1" max="50" title="最大步数"></label>
   <button id="btn-theme" class="ghost" data-i18n-title="title.theme" title="切换深色/浅色主题">🌙</button>
   <button id="btn-lang" class="ghost" data-i18n-title="title.lang" title="切换语言 / Switch language">EN</button>
+  <span id="user-badge" hidden></span>
+  <button id="btn-logout" class="ghost" hidden data-i18n="btn.logout" title="退出登录 (会话令牌立即失效)">退出</button>
   <button id="btn-sidebar" class="ghost" data-i18n-title="title.sidebar" title="侧栏">☰</button>
 </header>
 
@@ -114,7 +116,7 @@
     </div>
     <div id="kb" class="list"></div>
     <h3 data-i18n="sec.mcp">MCP / 插件</h3>
-    <div class="sched-form">
+    <div class="sched-form" id="mcp-form">
       <div class="sched-row">
         <input id="inp-mcp-name" data-i18n-ph="ph.mcp.name" placeholder="名称" maxlength="64">
         <input id="inp-mcp-cmd" data-i18n-ph="ph.mcp.cmd" placeholder="命令 (如 npx / python)" maxlength="500">
@@ -126,12 +128,42 @@
     </div>
     <div id="mcp" class="list"></div>
     <div id="mcp-catalog" class="list"></div>
+    <h3 id="sec-users" hidden data-i18n="sec.users">用户管理</h3>
+    <div class="sched-form" id="users-form" hidden>
+      <div class="sched-row">
+        <input id="inp-user-name" data-i18n-ph="ph.user.name" placeholder="用户名" maxlength="64">
+        <input id="inp-user-pass" type="password" data-i18n-ph="ph.user.pass" placeholder="密码 (至少 6 位)" maxlength="128">
+      </div>
+      <div class="sched-row">
+        <select id="sel-user-role" title="角色">
+          <option value="user" data-i18n="opt.role.user">普通用户</option>
+          <option value="admin" data-i18n="opt.role.admin">管理员</option>
+        </select>
+        <button id="btn-user-add" class="mini" data-i18n="btn.add">添加</button>
+      </div>
+    </div>
+    <div id="users" class="list" hidden></div>
+    <h3 id="sec-audit" hidden data-i18n="sec.audit">审计日志</h3>
+    <div class="sched-form" id="audit-form" hidden>
+      <button id="btn-audit-refresh" class="mini" data-i18n="btn.audit.refresh">刷新</button>
+    </div>
+    <div id="audit" class="list" hidden></div>
     <h3 data-i18n="sec.tools">可用工具</h3>
     <div id="tools" class="list"></div>
     <h3 data-i18n="sec.env">环境</h3>
     <div id="env" class="list"></div>
   </aside>
 </main>
+
+<div id="login-overlay" hidden>
+  <form id="login-card" autocomplete="off">
+    <h2>🤖 <span data-i18n="login.title">Agent 登录</span></h2>
+    <input id="inp-login-user" data-i18n-ph="ph.login.user" placeholder="用户名" maxlength="64" autofocus>
+    <input id="inp-login-pass" type="password" data-i18n-ph="ph.login.pass" placeholder="密码" maxlength="128">
+    <div id="login-err" class="err" hidden></div>
+    <button id="btn-login" class="primary" type="submit" data-i18n="btn.login">登录</button>
+  </form>
+</div>
 
 <div id="toast"></div>
 <script src="/static/md.js"></script>

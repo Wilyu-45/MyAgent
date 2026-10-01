@@ -18,6 +18,9 @@ dify-agent-runtime/
 openagent/
 tools/
 
-# 运行时数据 (任务历史 / 长期记忆)
+# 运行时数据 (任务历史 / 长期记忆 / 检查点 / 多用户账号)
 memory/*.json
 memory/*.sqlite
+memory/*.sqlite-shm
+memory/*.sqlite-wal
+memory/kb/

@@ -132,6 +132,7 @@ class Schedule:
     max_steps: Optional[int]
     schedule: dict                  # {"kind": "interval"|"daily"|"cron", ...}
     enabled: bool = True
+    owner: Optional[str] = None     # 创建用户 (多用户模式; None = 单用户模式或历史遗留)
     created_at: float = field(default_factory=time.time)
     next_run: float = 0.0           # epoch 秒; 0 = 待计算
     run_count: int = 0
@@ -146,6 +147,7 @@ class Schedule:
             "max_steps": self.max_steps,
             "schedule": self.schedule,
             "enabled": self.enabled,
+            "owner": self.owner,
             "created_at": self.created_at,
             "next_run": self.next_run,
             "run_count": self.run_count,
@@ -218,6 +220,7 @@ class ScheduleStore:
                         model=e.get("model"), max_steps=e.get("max_steps"),
                         schedule=e.get("schedule") or {},
                         enabled=bool(e.get("enabled", True)),
+                        owner=e.get("owner"),
                         created_at=float(e.get("created_at") or time.time()),
                         next_run=float(e.get("next_run") or 0.0),
                         run_count=int(e.get("run_count") or 0),
@@ -350,7 +353,8 @@ class Scheduler:
             self._firing.add(s.schedule_id)
             try:
                 nxt = compute_next_run(s.schedule, time.time())
-                task, _ = self._mgr.submit(s.goal, s.framework, s.model, s.max_steps)
+                task, _ = self._mgr.submit(s.goal, s.framework, s.model, s.max_steps,
+                                           owner=s.owner)
                 self._store.mark_fired(s.schedule_id, nxt, task.task_id)
                 submitted.append(task.task_id)
             except Exception as exc:  # noqa: BLE001 — 单计划失败不影响其他

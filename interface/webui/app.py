@@ -7,7 +7,9 @@ Web 交互界面服务 (FastAPI) — interface.webui
 - 模型服务查询由服务端代理 (modelservice 无 CORS, 避免跨端口直连)
 
 运行: python -m interface.webui [--port 8100] [--mock] [--workers N] [--token [TOKEN]]
+                                [--auth-users [FILE]]
 - 访问令牌: 启用后 /api/* 与 /health 需携带令牌 (静态页公开); 局域网访问 (--host 0.0.0.0) 必配
+- 多用户: --auth-users 启用账号登录 (POST /api/auth/login), 角色授权 (admin/user) + 数据隔离 + 审计
 """
 from __future__ import annotations
 
@@ -36,6 +38,8 @@ from .chat import stream_chat
 from .schedules import (Schedule, ScheduleStore, Scheduler, TICK_SECONDS,  # noqa: F401
                         compute_next_run, new_schedule_id, validate_schedule)
 from .tasks import TaskManager
+from .users import (AuditLog, ROLES, SESSION_TTL_SECONDS, SessionManager,
+                    UserStore)
 
 logger = logging.getLogger("interface.webui")
 
@@ -176,6 +180,39 @@ class McpInstall(BaseModel):
     id: str = Field(min_length=1, max_length=64)
 
 
+class LoginIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class UserAdd(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=6, max_length=128)
+    role: str = "user"
+
+    @field_validator("role")
+    @classmethod
+    def _check_role(cls, v: str) -> str:
+        if v not in ROLES:
+            raise ValueError("角色仅支持 admin / user")
+        return v
+
+
+class PasswordIn(BaseModel):
+    password: str = Field(min_length=6, max_length=128)
+
+
+class RoleIn(BaseModel):
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def _check_role(cls, v: str) -> str:
+        if v not in ROLES:
+            raise ValueError("角色仅支持 admin / user")
+        return v
+
+
 def _err(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
 
@@ -222,8 +259,13 @@ def _model_profiles() -> dict[str, str]:
         return {}
 
 
-def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None) -> FastAPI:
+def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None,
+               users_file: Optional[str] = None) -> FastAPI:
     token = (token or "").strip() or None   # 空串视为未启用
+    # 多用户模式: users_file 非空时启用账号登录 + 角色 + 审计 (单 token 模式行为不变)
+    users = UserStore(users_file) if users_file else None
+    sessions = SessionManager() if users else None
+    audit = AuditLog() if users else None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -251,9 +293,136 @@ def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None
         lifespan=lifespan,
     )
 
-    # ==================== 访问令牌 ====================
-    # 启用后 /api/* 与 /health 需携带令牌; 静态页公开 (页面无数据, 支持先打开页面再带令牌访问)
-    if token:
+    # ==================== 访问控制 ====================
+    # 单 token 模式: /api/* 与 /health 需携带令牌; 静态页公开 (页面无数据, 支持先打开页面再带令牌访问)
+    # 多用户模式 (users_file): 账号密码登录换会话令牌, 角色授权 + 审计
+
+    def _audit(request: Request, action: str, target: str = "",
+               detail: str = "", ok: bool = True) -> None:
+        """审计埋点: 多用户模式写 audit.jsonl, 其余模式 no-op。"""
+        if audit:
+            audit.append(getattr(request.state, "user", "-") or "-",
+                         action, target, detail, ok)
+
+    def _can_access(request: Request, owner: Optional[str]) -> bool:
+        """数据可见性: admin 全量; 普通用户仅本人数据 (owner=None 历史遗留数据全员可见)。"""
+        if not users:
+            return True
+        if request.state.role == "admin":
+            return True
+        return owner in (None, request.state.user)
+
+    if users:
+        def _ident(request: Request) -> Optional[tuple]:
+            sess = sessions.resolve(_token_from_request(request))
+            return (sess["user"], sess["role"]) if sess else None
+
+        def _role_allowed(request: Request) -> bool:
+            if request.state.role == "admin":
+                return True
+            p = request.url.path
+            if p.startswith("/api/users") or p.startswith("/api/audit"):
+                return False
+            if p.startswith("/api/mcp") and request.method != "GET":
+                return False
+            return True
+
+        @app.middleware("http")
+        async def auth_guard(request: Request, call_next):
+            path = request.url.path
+            if not (path.startswith("/api/") or path == "/health"):
+                return await call_next(request)
+            if path == "/api/auth/login":
+                return await call_next(request)
+            ident = _ident(request)
+            if ident is None:
+                resp = _err(401, "unauthorized",
+                            "未登录或会话已过期 (POST /api/auth/login 登录获取会话令牌)")
+                resp.headers["WWW-Authenticate"] = "Bearer"
+                return resp
+            request.state.user, request.state.role = ident
+            if not _role_allowed(request):
+                _audit(request, "forbidden", path)
+                return _err(403, "forbidden", "需要管理员权限")
+            return await call_next(request)
+
+        # ---- 认证 ----
+        @app.post("/api/auth/login")
+        async def auth_login(req: LoginIn):
+            role = users.verify(req.username, req.password)
+            if role is None:
+                audit.append(req.username, "login", ok=False)
+                return _err(401, "invalid_credentials", "用户名或密码错误")
+            tok = sessions.issue(req.username, role)
+            audit.append(req.username, "login")
+            resp = JSONResponse({"token": tok, "user": req.username, "role": role})
+            # httponly cookie: EventSource 无法带自定义请求头, 与单 token 模式共用 webui_token 通道
+            resp.set_cookie("webui_token", tok, httponly=True, samesite="lax",
+                            max_age=SESSION_TTL_SECONDS)
+            return resp
+
+        @app.get("/api/auth/me")
+        async def auth_me(request: Request):
+            return {"user": request.state.user, "role": request.state.role}
+
+        @app.post("/api/auth/logout")
+        async def auth_logout(request: Request):
+            sessions.revoke(_token_from_request(request))
+            _audit(request, "logout")
+            resp = JSONResponse({"ok": True})
+            resp.delete_cookie("webui_token")
+            return resp
+
+        # ---- 用户管理 (admin) ----
+        @app.get("/api/users")
+        async def users_list():
+            return {"users": users.list()}
+
+        @app.post("/api/users", status_code=201)
+        async def users_add(request: Request, req: UserAdd):
+            try:
+                info = users.add(req.username, req.password, req.role)
+            except ValueError as e:
+                return _err(422, "invalid_user", str(e))
+            _audit(request, "user_add", req.username, req.role)
+            return {"user": info}
+
+        @app.post("/api/users/{name}/password")
+        async def users_reset_password(name: str, request: Request, req: PasswordIn):
+            if not users.exists(name):
+                return _err(404, "user_not_found", f"用户不存在: {name}")
+            try:
+                users.set_password(name, req.password)
+            except ValueError as e:
+                return _err(422, "invalid_user", str(e))
+            _audit(request, "user_password", name)
+            return {"ok": True}
+
+        @app.post("/api/users/{name}/role")
+        async def users_change_role(name: str, request: Request, req: RoleIn):
+            if not users.exists(name):
+                return _err(404, "user_not_found", f"用户不存在: {name}")
+            users.set_role(name, req.role)
+            _audit(request, "user_role", name, req.role)
+            return {"ok": True, "user": {"name": name, "role": req.role}}
+
+        @app.delete("/api/users/{name}")
+        async def users_delete(name: str, request: Request):
+            if name == request.state.user:
+                return _err(422, "cannot_delete_self", "不能删除当前登录账号")
+            try:
+                users.remove(name)
+            except ValueError as e:
+                return _err(404, "user_not_found", str(e))
+            sessions.revoke_user(name)   # 被删用户会话立即失效
+            _audit(request, "user_del", name)
+            return {"ok": True}
+
+        # ---- 审计日志 (admin) ----
+        @app.get("/api/audit")
+        async def audit_tail(limit: int = Query(200, ge=1, le=1000)):
+            return {"entries": audit.tail(limit)}
+    elif token:
         def _authorized(request: Request) -> bool:
             got = _token_from_request(request) or ""
             # 常数时间比较, 避免时序侧信道
@@ -347,24 +516,27 @@ def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None
         return {"mode": "all", "stats": mem.stats(), "entries": mem.snapshot()}
 
     @app.post("/api/memory")
-    async def api_memory_add(req: MemoryAdd):
+    async def api_memory_add(req: MemoryAdd, request: Request):
         mem = _memory()
         key = req.key.strip() or "default"
         mem.append(key, req.value.strip())
+        _audit(request, "memory_add", key)
         return {"ok": True, "key": key, "stats": mem.stats()}
 
     @app.delete("/api/memory/{key}")
-    async def api_memory_del_key(key: str):
+    async def api_memory_del_key(key: str, request: Request):
         if not _memory().remove_key(key):
             return JSONResponse({"error": {"code": "not_found",
                                            "message": f"记忆分类不存在: {key}"}}, status_code=404)
+        _audit(request, "memory_del", key)
         return {"ok": True}
 
     @app.delete("/api/memory/{key}/{index}")
-    async def api_memory_del_entry(key: str, index: int):
+    async def api_memory_del_entry(key: str, index: int, request: Request):
         if not _memory().remove(key, index):
             return JSONResponse({"error": {"code": "not_found",
                                            "message": "记忆条目不存在"}}, status_code=404)
+        _audit(request, "memory_del", f"{key}[{index}]")
         return {"ok": True}
 
     # ==================== 知识库 (RAG) ====================
@@ -378,7 +550,7 @@ def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None
         return _kb().stats()
 
     @app.post("/api/kb")
-    async def api_kb_add(req: KbAdd):
+    async def api_kb_add(req: KbAdd, request: Request):
         from planner.knowledge import decode_document
 
         try:
@@ -388,13 +560,15 @@ def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None
             return _err(422, "invalid_document", str(e))
         except RuntimeError as e:  # PDF 解析失败 (缺库 / 扫描件)
             return _err(422, "parse_failed", str(e))
+        _audit(request, "kb_add", req.name)
         return {"ok": True, "doc": doc}
 
     @app.delete("/api/kb/{doc_id}")
-    async def api_kb_del(doc_id: str):
+    async def api_kb_del(doc_id: str, request: Request):
         if not _kb().remove_document(doc_id):
             return JSONResponse({"error": {"code": "not_found",
                                            "message": "文档不存在"}}, status_code=404)
+        _audit(request, "kb_del", doc_id)
         return {"ok": True}
 
     @app.get("/api/kb/search")
@@ -417,15 +591,16 @@ def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None
         return {"servers": servers, "catalog": catalog}
 
     @app.post("/api/mcp")
-    async def api_mcp_add(req: McpAdd):
+    async def api_mcp_add(req: McpAdd, request: Request):
         try:
             entry = _mcp_store().add(req.name, req.command, req.args, req.env)
         except ValueError as e:
             return _err(422, "invalid_server", str(e))
+        _audit(request, "mcp_add", req.name)
         return {"ok": True, "server": entry}
 
     @app.post("/api/mcp/install")
-    async def api_mcp_install(req: McpInstall):
+    async def api_mcp_install(req: McpInstall, request: Request):
         from planner.adapters.mcp_store import CATALOG
 
         item = next((c for c in CATALOG if c["id"] == req.id), None)
@@ -437,19 +612,22 @@ def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None
         except ValueError as e:
             return _err(409, "already_installed" if "已存在" in str(e)
                         else "invalid_server", str(e))
+        _audit(request, "mcp_install", req.id)
         return {"ok": True, "server": entry}
 
     @app.post("/api/mcp/{name}/toggle")
-    async def api_mcp_toggle(name: str):
+    async def api_mcp_toggle(name: str, request: Request):
         entry = _mcp_store().toggle(name)
         if entry is None:
             return _err(404, "not_found", f"服务器不存在: {name}")
+        _audit(request, "mcp_toggle", name, str(entry.get("enabled")))
         return {"ok": True, "server": entry}
 
     @app.delete("/api/mcp/{name}")
-    async def api_mcp_del(name: str):
+    async def api_mcp_del(name: str, request: Request):
         if not _mcp_store().remove(name):
             return _err(404, "not_found", f"服务器不存在: {name}")
+        _audit(request, "mcp_del", name)
         return {"ok": True}
 
     @app.post("/api/mcp/{name}/test")
@@ -519,7 +697,7 @@ def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None
 
     # ==================== 任务 ====================
     @app.post("/api/tasks", status_code=202)
-    async def create_task(req: TaskCreate):
+    async def create_task(req: TaskCreate, request: Request):
         frameworks = load_manifest()
         if req.framework not in frameworks:
             return _err(422, "unknown_framework",
@@ -532,44 +710,57 @@ def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None
             return _err(422, "images_unsupported",
                         f"框架 '{req.framework}' 暂不支持图片输入 (可用: {', '.join(sorted(image_ok))})")
         task, position = mgr().submit(goal, req.framework, req.model, req.max_steps,
-                                      thread_id=req.thread_id, images=req.images)
+                                      thread_id=req.thread_id, images=req.images,
+                                      owner=getattr(request.state, "user", None))
+        _audit(request, "task_submit", task.task_id, goal[:80])
         return {"task_id": task.task_id, "queued": task.status == "queued",
                 "queue_position": position}
 
     @app.get("/api/tasks")
-    async def list_tasks():
-        return {"tasks": mgr().recent(50)}
+    async def list_tasks(request: Request):
+        items = mgr().recent(50)
+        if users and request.state.role != "admin":
+            items = [t for t in items if t.get("owner") in (None, request.state.user)]
+        return {"tasks": items}
 
     @app.get("/api/tasks/{task_id}")
-    async def get_task(task_id: str):
+    async def get_task(task_id: str, request: Request):
         snap = mgr().snapshot(task_id)
-        if snap is None:
+        if snap is None or not _can_access(request, snap.get("owner")):
             return _err(404, "task_not_found", f"未知任务: {task_id}")
         return snap
 
     @app.post("/api/tasks/{task_id}/cancel")
-    async def cancel_task(task_id: str):
-        if mgr().snapshot(task_id) is None:
+    async def cancel_task(task_id: str, request: Request):
+        snap = mgr().snapshot(task_id)
+        if snap is None or not _can_access(request, snap.get("owner")):
             return _err(404, "task_not_found", f"未知任务: {task_id}")
-        return {"cancelled": mgr().cancel(task_id)}
+        cancelled = mgr().cancel(task_id)
+        _audit(request, "task_cancel", task_id)
+        return {"cancelled": cancelled}
 
     @app.post("/api/tasks/{task_id}/approval")
-    async def task_approval(task_id: str, req: ApprovalDecision):
+    async def task_approval(task_id: str, req: ApprovalDecision, request: Request):
         """回复等待中的审批请求 (批准/拒绝); 无匹配请求返回 409。"""
-        if mgr().snapshot(task_id) is None:
+        snap = mgr().snapshot(task_id)
+        if snap is None or not _can_access(request, snap.get("owner")):
             return _err(404, "task_not_found", f"未知任务: {task_id}")
         if not mgr().approve(task_id, req.approval_id, req.approved):
             return _err(409, "no_pending_approval",
                         "没有待处理的审批请求 (可能已超时/已处理/任务已结束)")
+        _audit(request, "task_approval", task_id, "approved" if req.approved else "rejected")
         return {"ok": True, "approved": req.approved}
 
     # ==================== 定时任务 ====================
     @app.get("/api/schedules")
-    async def list_schedules():
-        return {"schedules": [s.summary() for s in app.state.schedules.list()]}
+    async def list_schedules(request: Request):
+        items = app.state.schedules.list()
+        if users and request.state.role != "admin":
+            items = [s for s in items if s.owner in (None, request.state.user)]
+        return {"schedules": [s.summary() for s in items]}
 
     @app.post("/api/schedules", status_code=201)
-    async def create_schedule(req: ScheduleCreate):
+    async def create_schedule(req: ScheduleCreate, request: Request):
         frameworks = load_manifest()
         if req.framework not in frameworks:
             return _err(422, "unknown_framework",
@@ -583,33 +774,41 @@ def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None
         now = time.time()
         s = Schedule(schedule_id=new_schedule_id(), goal=goal, framework=req.framework,
                      model=req.model, max_steps=req.max_steps, schedule=req.schedule,
-                     created_at=now, next_run=compute_next_run(req.schedule, now))
+                     created_at=now, next_run=compute_next_run(req.schedule, now),
+                     owner=getattr(request.state, "user", None))
         app.state.schedules.add(s)
+        _audit(request, "schedule_add", s.schedule_id, goal[:80])
         return {"schedule": s.summary()}
 
     @app.post("/api/schedules/{schedule_id}/toggle")
-    async def toggle_schedule(schedule_id: str):
+    async def toggle_schedule(schedule_id: str, request: Request):
         s = app.state.schedules.get(schedule_id)
-        if s is None:
+        if s is None or not _can_access(request, s.owner):
             return _err(404, "schedule_not_found", f"未知定时任务: {schedule_id}")
         enabled = not s.enabled
         app.state.schedules.set_enabled(schedule_id, enabled)
+        _audit(request, "schedule_toggle", schedule_id, str(enabled))
         return {"schedule_id": schedule_id, "enabled": enabled}
 
     @app.post("/api/schedules/{schedule_id}/run-now")
-    async def run_schedule_now(schedule_id: str):
+    async def run_schedule_now(schedule_id: str, request: Request):
         """立即触发一次 (不影响计划节奏)。"""
         s = app.state.schedules.get(schedule_id)
-        if s is None:
+        if s is None or not _can_access(request, s.owner):
             return _err(404, "schedule_not_found", f"未知定时任务: {schedule_id}")
-        task, position = mgr().submit(s.goal, s.framework, s.model, s.max_steps)
+        task, position = mgr().submit(s.goal, s.framework, s.model, s.max_steps,
+                                      owner=s.owner)
+        _audit(request, "schedule_run", schedule_id, task.task_id)
         return {"task_id": task.task_id, "queued": task.status == "queued",
                 "queue_position": position}
 
     @app.delete("/api/schedules/{schedule_id}")
-    async def delete_schedule(schedule_id: str):
-        if not app.state.schedules.remove(schedule_id):
+    async def delete_schedule(schedule_id: str, request: Request):
+        s = app.state.schedules.get(schedule_id)
+        if s is None or not _can_access(request, s.owner):
             return _err(404, "schedule_not_found", f"未知定时任务: {schedule_id}")
+        app.state.schedules.remove(schedule_id)
+        _audit(request, "schedule_del", schedule_id)
         return {"ok": True}
 
     # ==================== SSE 事件流 ====================
@@ -622,6 +821,9 @@ def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None
         last_id = request.headers.get("last-event-id")
         if last_id and last_id.isdigit():
             after_seq = max(after_seq, int(last_id))  # 浏览器断线重连自带
+        snap = mgr().snapshot(task_id)
+        if snap is None or not _can_access(request, snap.get("owner")):
+            return _err(404, "task_not_found", f"未知任务: {task_id}")
         sub = mgr().subscribe(task_id, after_seq)
         if sub is None:
             return _err(404, "task_not_found", f"未知任务: {task_id}")
@@ -680,6 +882,7 @@ def create_app(mock: bool = False, workers: int = 1, token: Optional[str] = None
             "workers": workers,
             "mock": mock,
             "auth": bool(token),
+            "users": bool(users),
         }
 
     @app.get("/health")

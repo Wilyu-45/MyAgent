@@ -104,7 +104,10 @@ async function apiFetch(url, opts) {
   const r = await fetch(url, o);
   if (r.status === 401) {
     authBlocked = true;
-    if (!authWarned) {
+    if (usersMode) {   // 多用户模式: 会话过期 → 回登录浮层 (而非令牌提示)
+      me = null;
+      applyAuthUi();
+    } else if (!authWarned) {
       authWarned = true;
       toast("需要访问令牌: 请在地址后加 ?token=你的令牌 重新打开");
     }
@@ -115,16 +118,96 @@ async function apiFetch(url, opts) {
   return r;
 }
 
+/* ==================== 多用户登录 / 角色 ==================== */
+/* 服务端以 --auth-users 启用时: /api/auth/me 探测登录态 (404=单用户/令牌模式);
+ * 登录成功后会话令牌复用单 token 通道 (localStorage + Bearer 头 + webui_token cookie)。 */
+let usersMode = false;
+let me = null;   // {user, role}; null = 未登录
+
+async function probeAuth() {
+  try {
+    const r = await fetch("/api/auth/me", { headers: authHeaders() });
+    if (r.status === 404) return;   // 单用户 / 令牌模式: 端点不存在
+    usersMode = true;
+    me = r.ok ? await r.json() : null;
+  } catch { /* 服务不可达: 按未登录处理 */ }
+}
+
+function applyAuthUi() {
+  const authed = usersMode && !!me;
+  $("login-overlay").hidden = !usersMode || !!me;
+  $("user-badge").hidden = !authed;
+  if (authed) $("user-badge").textContent = (me.role === "admin" ? "🛡️ " : "👤 ") + me.user;
+  $("btn-logout").hidden = !authed;
+  const admin = authed && me.role === "admin";
+  for (const id of ["sec-users", "users-form", "users", "sec-audit", "audit-form", "audit"]) {
+    $(id).hidden = !admin;
+  }
+  $("mcp-form").hidden = authed && !admin;   // 普通用户 MCP 只读 (后端同样拒绝写操作)
+}
+
+function bindAuth() {
+  $("login-card").addEventListener("submit", (e) => { e.preventDefault(); login(); });
+  $("btn-logout").addEventListener("click", logout);
+  $("btn-user-add").addEventListener("click", addUser);
+  $("btn-audit-refresh").addEventListener("click", loadAudit);
+}
+
+async function login() {
+  const btn = $("btn-login");
+  btn.disabled = true;
+  const showErr = (msg) => { const n = $("login-err"); n.textContent = msg; n.hidden = false; };
+  try {
+    const r = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: $("inp-login-user").value.trim(),
+                             password: $("inp-login-pass").value }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { showErr((d.error && d.error.message) || t("登录失败")); return; }
+    me = { user: d.user, role: d.role };
+    authToken = d.token;
+    try {
+      localStorage.setItem("ui-token", d.token);
+      document.cookie = "webui_token=" + encodeURIComponent(d.token) + "; path=/; SameSite=Lax";
+    } catch { /* 受限环境: 仅靠服务端 cookie */ }
+    $("login-err").hidden = true;
+    $("inp-login-pass").value = "";
+    applyAuthUi();
+    bootData();
+    toast(t("欢迎, {0}", d.user));
+  } catch (e) {
+    showErr(t("登录失败: {0}", e.message));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function logout() {
+  try { await apiFetch("/api/auth/logout", { method: "POST" }); } catch { /* 忽略 */ }
+  me = null;
+  authToken = "";
+  try {
+    localStorage.removeItem("ui-token");
+    document.cookie = "webui_token=; path=/; Max-Age=0";
+  } catch { /* 忽略 */ }
+  applyAuthUi();
+}
+
 /* ==================== 初始化 ==================== */
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   bindKeys();
   applyMode(mode);            // 先应用模式 (决定模型下拉的 profile 过滤)
-  loadFrameworks();
-  loadModels();
-  loadTools();
-  refreshHealth();
+  bindAuth();
+  await probeAuth();          // 多用户模式探测: 未登录则弹登录浮层并跳过数据加载
+  bindUI();
+  applyAuthUi();
+  if (!usersMode || me) bootData();
   setInterval(refreshHealth, 5000);
-  loadHistory();
+});
+
+function bindUI() {
   $("btn-send").addEventListener("click", send);
   $("btn-cancel").addEventListener("click", cancelCurrent);
   $("btn-sidebar").addEventListener("click", () => $("sidebar").classList.toggle("open"));
@@ -139,12 +222,10 @@ document.addEventListener("DOMContentLoaded", () => {
   setupVoice("btn-chat-voice", "inp-chat");
   $("btn-sched-add").addEventListener("click", addSchedule);
   $("sel-sched-kind").addEventListener("change", schedKindChanged);
-  loadSchedules();
   $("btn-mem-add").addEventListener("click", addMemory);
   $("inp-mem-search").addEventListener("keydown", (e) => {
     if (e.key === "Enter") loadMemory($("inp-mem-search").value.trim());
   });
-  loadMemory("");
   $("btn-kb-add").addEventListener("click", () => $("file-kb").click());
   $("file-kb").addEventListener("change", () => {
     if ($("file-kb").files.length) uploadKbFiles([...$("file-kb").files]);
@@ -156,17 +237,24 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btn-theme").addEventListener("click", toggleTheme);
   $("btn-lang").addEventListener("click", toggleLang);
   onI18nChange(() => {   // 切换语言: 重渲染动态面板 (静态框架由 applyI18n 覆盖)
-    loadHistory();
-    loadSchedules();
-    loadMemory("");
-    loadKb("");
-    loadMcp();
-    loadTools();
-    refreshHealth();
+    bootData();
   });
   $("btn-mcp-add").addEventListener("click", addMcp);
+}
+
+/* 数据面板加载 (启动 / 登录成功 / 语言切换后共用) */
+function bootData() {
+  loadFrameworks();
+  loadModels();
+  loadTools();
+  refreshHealth();
+  loadHistory();
+  loadSchedules();
+  loadMemory("");
+  loadKb("");
   loadMcp();
-});
+  if (me && me.role === "admin") { loadUsers(); loadAudit(); }
+}
 
 /* ==================== 图片附件 (多模态输入) ==================== */
 /* 输入区图片选择器: 点击选择 / 粘贴 / 拖拽 / 屏幕截图, 缩略预览可移除。
@@ -416,7 +504,7 @@ async function refreshHealth() {
     if (r.status === 401) {   // 令牌无效/缺失: 状态灯明确提示 (toast 由 apiFetch 节流)
       msOnline = false;
       $("ms-dot").className = "dot off";
-      $("ms-text").textContent = t("需要访问令牌");
+      $("ms-text").textContent = t(usersMode ? "未登录" : "需要访问令牌");
       return;
     }
     const h = await r.json();
@@ -466,8 +554,9 @@ async function loadHistory() {
       const item = el("div", "item");
       const dur = task.metrics && task.metrics.duration_ms
         ? ` · ${(task.metrics.duration_ms / 1000).toFixed(1)}s` : "";
+      const owner = me && me.role === "admin" && task.owner ? ` · ${task.owner}` : "";
       item.appendChild(el("div", "row", `${m.icon} ${task.framework} · ${fmtTime(task.created_at)}`
-        + (task.steps ? ` · ${task.steps} ${t("步")}` : "") + dur));
+        + (task.steps ? ` · ${task.steps} ${t("步")}` : "") + dur + owner));
       item.appendChild(el("div", "goal muted", task.goal));
       item.title = task.goal;
       item.addEventListener("click", () => viewTask(task.task_id));
@@ -758,7 +847,12 @@ async function uploadKbFiles(files) {
 }
 
 /* ==================== MCP / 插件市场 (侧栏) ==================== */
-/* 已配置服务器 + 内置市场目录; 安装后 mcp 框架任务自动加载 */
+/* 已配置服务器 + 内置市场目录; 安装后 mcp 框架任务自动加载。
+ * 多用户模式普通角色只读 (后端拒绝写操作, 界面同步隐藏操作按钮)。 */
+function mcpWritable() {
+  return !usersMode || (me && me.role === "admin");
+}
+
 async function loadMcp() {
   try {
     const r = await apiFetch("/api/mcp");
@@ -781,6 +875,7 @@ function renderMcp(d) {
     const v = el("div", "goal muted", `${s.command} ${(s.args || []).join(" ")}`.slice(0, 120));
     v.title = `${s.command} ${(s.args || []).join(" ")}`;
     item.appendChild(v);
+    if (!mcpWritable()) { box.appendChild(item); continue; }
     const acts = el("div", "sched-acts");
     const test = el("button", "mini", t("测试"));
     test.title = t("拉起该服务器并发现工具 (stdio 连接测试)");
@@ -829,7 +924,7 @@ function renderMcp(d) {
     const acts = el("div", "sched-acts");
     if (c.installed) {
       acts.appendChild(el("span", "muted", t("已安装")));
-    } else {
+    } else if (mcpWritable()) {
       const btn = el("button", "mini", t("安装"));
       btn.title = t("加入已配置列表 (mcp 框架任务自动加载)");
       btn.addEventListener("click", async () => {
@@ -1525,4 +1620,112 @@ function chatClear() {
   hint.appendChild(el("code", null, "chat"));
   hint.appendChild(document.createTextNode(t("hint.chat.post")));
   box.appendChild(hint);
+}
+/* ==================== 用户管理 / 审计日志 (admin) ==================== */
+/* 多用户模式管理员可见: 账号增删改密改角色; 审计记录最近 100 条 */
+async function loadUsers() {
+  try {
+    const r = await apiFetch("/api/users");
+    if (!r.ok) return;
+    renderUsers((await r.json()).users || []);
+  } catch { /* 忽略 */ }
+}
+
+function renderUsers(items) {
+  const box = $("users");
+  box.replaceChildren();
+  if (!items.length) { box.appendChild(el("div", "muted", t("暂无用户"))); return; }
+  for (const u of items) {
+    const item = el("div", "item");
+    item.appendChild(el("div", "row",
+      `${u.role === "admin" ? "🛡️" : "👤"} ${u.name} · ${t(u.role === "admin" ? "管理员" : "普通用户")}`));
+    if (u.created) item.appendChild(el("div", "goal muted", u.created));
+    const acts = el("div", "sched-acts");
+    const pw = el("button", "mini", t("改密"));
+    pw.title = t("重置该用户密码");
+    pw.addEventListener("click", async () => {
+      const np = prompt(t("输入 {0} 的新密码 (至少 6 位)", u.name));
+      if (np === null) return;
+      try {
+        const r = await apiFetch(`/api/users/${encodeURIComponent(u.name)}/password`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: np }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { toast((d.error && d.error.message) || t("操作失败")); return; }
+        toast(t("已重置 {0} 的密码", u.name));
+      } catch { toast(t("操作失败")); }
+    });
+    const rl = el("button", "mini", u.role === "admin" ? t("降为用户") : t("升为管理员"));
+    rl.title = t("切换该用户角色");
+    rl.addEventListener("click", async () => {
+      try {
+        const r = await apiFetch(`/api/users/${encodeURIComponent(u.name)}/role`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: u.role === "admin" ? "user" : "admin" }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { toast((d.error && d.error.message) || t("操作失败")); return; }
+        loadUsers();
+      } catch { toast(t("操作失败")); }
+    });
+    acts.append(pw, rl);
+    if (u.name !== (me && me.user)) {
+      const del = el("button", "mini", t("删除"));
+      del.title = t("删除该用户 (其会话立即失效)");
+      del.addEventListener("click", async () => {
+        if (!confirm(t("删除用户 {0}? 该用户会话将立即失效", u.name))) return;
+        try {
+          const r = await apiFetch(`/api/users/${encodeURIComponent(u.name)}`, { method: "DELETE" });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) { toast((d.error && d.error.message) || t("删除失败")); return; }
+          loadUsers();
+          toast(t("用户 {0} 已删除", u.name));
+        } catch { toast(t("删除失败")); }
+      });
+      acts.appendChild(del);
+    }
+    item.appendChild(acts);
+    box.appendChild(item);
+  }
+}
+
+async function addUser() {
+  const name = $("inp-user-name").value.trim();
+  const password = $("inp-user-pass").value;
+  if (!name || !password) { toast(t("用户名与密码不能为空")); return; }
+  try {
+    const r = await apiFetch("/api/users", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: name, password, role: $("sel-user-role").value }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast((d.error && d.error.message) || t("添加失败")); return; }
+    $("inp-user-name").value = "";
+    $("inp-user-pass").value = "";
+    loadUsers();
+    toast(t("用户 {0} 已添加", name));
+  } catch { toast(t("添加失败")); }
+}
+
+async function loadAudit() {
+  try {
+    const r = await apiFetch("/api/audit?limit=100");
+    if (!r.ok) return;
+    renderAudit((await r.json()).entries || []);
+  } catch { /* 忽略 */ }
+}
+
+function renderAudit(entries) {
+  const box = $("audit");
+  box.replaceChildren();
+  if (!entries.length) { box.appendChild(el("div", "muted", t("暂无审计记录"))); return; }
+  for (const e of entries.slice().reverse()) {
+    const item = el("div", "item");
+    item.appendChild(el("div", "row",
+      `${e.ok ? "·" : "✗"} ${e.user} · ${e.action}${e.target ? " · " + e.target : ""}`));
+    const sub = (e.ts || "") + (e.detail ? " · " + e.detail : "");
+    if (sub) { const v = el("div", "goal muted", sub); v.title = sub; item.appendChild(v); }
+    box.appendChild(item);
+  }
 }

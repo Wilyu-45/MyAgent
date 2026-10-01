@@ -1,5 +1,7 @@
 """
-界面服务入口: python -m interface.webui [--host] [--port] [--mock] [--workers N] [--token [TOKEN]] [--open] [--desktop]
+界面服务入口: python -m interface.webui [--host] [--port] [--mock] [--workers N] [--token [TOKEN]]
+                                          [--auth-users [FILE]] [--add-user NAME:PASSWORD[:ROLE]]
+                                          [--open] [--desktop]
 
 示例:
     python -m interface.webui                      # 127.0.0.1:8100 (任务串行)
@@ -7,6 +9,8 @@
     python -m interface.webui --open               # 启动后自动打开浏览器
     python -m interface.webui --mock --open        # Agent 任务离线演示 (无需 modelservice)
     python -m interface.webui --host 0.0.0.0 --token   # 局域网访问 + 随机访问令牌
+    python -m interface.webui --auth-users         # 多用户登录 (空库自动创建 admin, 密码打印在控制台)
+    python -m interface.webui --auth-users --add-user alice:secret123 admin   # 预建账号后退出
     python -m interface.webui --desktop --mock     # 桌面窗口 (pywebview), 离线演示
 """
 from __future__ import annotations
@@ -55,16 +59,53 @@ def main() -> None:
     parser.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
     parser.add_argument("--token", nargs="?", const="auto", default=None, metavar="TOKEN",
                         help="访问令牌 (默认未启用): 单独给出 --token 随机生成; --token xxx 指定")
+    parser.add_argument("--auth-users", nargs="?", const="default", default=None, metavar="FILE",
+                        help="启用多用户账号登录 (可选账号文件, 默认 memory/users.json): "
+                             "POST /api/auth/login 换会话令牌, 角色 admin/user + 审计")
+    parser.add_argument("--add-user", default=None, metavar="NAME:PASSWORD[:ROLE]",
+                        help="向账号文件添加用户后退出 (不启动服务); 引导管理员用: "
+                             "--auth-users --add-user admin:xxx:admin")
     parser.add_argument("--desktop", action="store_true",
                         help="以桌面窗口运行 (pywebview); 忽略 --host/--port/--open, 使用临时空闲端口")
     args = parser.parse_args()
 
+    if args.add_user:
+        from .users import UserStore
+
+        path = args.auth_users if args.auth_users not in (None, "default") else None
+        store = UserStore(path)
+        parts = args.add_user.split(":")
+        if len(parts) not in (2, 3):
+            print("[webui] --add-user 格式: NAME:PASSWORD[:ROLE] (角色 admin/user)")
+            sys.exit(2)
+        try:
+            store.add(parts[0], parts[1], parts[2] if len(parts) == 3 else "user")
+        except ValueError as e:
+            print(f"[webui] 添加用户失败: {e}")
+            sys.exit(2)
+        print(f"[webui] 用户已添加: {parts[0]} ({parts[2] if len(parts) == 3 else 'user'})"
+              f" -> {store.path}")
+        return
+
     token = _resolve_token(args.token)
+    users_file = None
+    if args.auth_users:
+        if token:
+            print("[webui] ⚠ 多用户模式已启用, --token 被忽略")
+            token = None
+        from .users import UserStore
+
+        users_file = args.auth_users if args.auth_users != "default" else None
+        store = UserStore(users_file)
+        if len(store) == 0:
+            pwd = store.seed_admin()
+            print(f"[webui] 账号文件为空, 已创建初始管理员: admin / {pwd}")
     if args.desktop:
         from .desktop import run_desktop
         if token:
             print(f"[webui] 访问令牌已启用: {token}")
-        sys.exit(run_desktop(mock=args.mock, workers=args.workers, token=token))
+        sys.exit(run_desktop(mock=args.mock, workers=args.workers, token=token,
+                             users_file=users_file))
     if token:
         print(f"[webui] 访问令牌已启用: {token}")
         print(f"[webui] 本机访问: http://127.0.0.1:{args.port}/?token={token}")
@@ -83,7 +124,8 @@ def main() -> None:
         url = f"http://{host}:{args.port}/" + (f"?token={token}" if token else "")
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 
-    uvicorn.run(create_app(mock=args.mock, workers=args.workers, token=token),
+    uvicorn.run(create_app(mock=args.mock, workers=args.workers, token=token,
+                           users_file=users_file),
                 host=args.host, port=args.port, log_level="info")
 
 

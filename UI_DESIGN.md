@@ -81,6 +81,9 @@ myagent\Scripts\python.exe -m interface.webui --open       # 启动后自动打�
 myagent\Scripts\python.exe -m interface.webui --mock       # Agent 任务离线演示
 myagent\Scripts\python.exe -m interface.webui --token      # 本机 + 随机访问令牌 (打印带令牌 URL)
 myagent\Scripts\python.exe -m interface.webui --host 0.0.0.0 --token   # 局域网访问 (其他设备用打印的 URL 打开)
+myagent\Scripts\python.exe -m interface.webui --auth-users  # 多用户模式 (账号文件为空自动创建初始 admin 并打印密码)
+myagent\Scripts\python.exe -m interface.webui --auth-users my_users.json   # 多用户模式 (指定账号文件)
+myagent\Scripts\python.exe -m interface.webui --add-user alice:secret123:user   # 添加用户后退出 (不启动服务)
 myagent\Scripts\python.exe -m interface.webui --desktop    # 桌面窗口 (pywebview/WebView2, 临时空闲端口)
 myagent\Scripts\python.exe -m interface.webui --desktop --mock --token # 桌面窗口: 离线演示 + 随机令牌
 ```
@@ -93,16 +96,17 @@ myagent\Scripts\python.exe -m interface.webui --desktop --mock --token # 桌面�
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ 顶栏: 🤖 Agent  [Agent 任务｜Chat 对话]  ●状态灯  框架▾ 模型▾ 步数▢  🌙 EN ☰  │
+│ 顶栏: 🤖 Agent  [Agent 任务｜Chat 对话]  ●状态灯  框架▾ 模型▾ 步数▢  🌙 EN [👤admin 退出] ☰ │
 ├──────────────────────────────────────────────┬───────────────────────────────┤
 │ Agent 任务视图（默认）                        │ 侧栏（仅 Agent 模式）          │
-│  用户气泡 + Agent 卡片（💭 🔧 ▸ ✅ 时间线）   │  任务历史 / 可用工具 / 环境    │
-│  输入区: [任务目标____] [发送] [■ 取消]       │                               │
+│  用户气泡 + Agent 卡片（💭 🔧 ▸ ✅ 时间线）   │  任务历史 / …管理区 / 可用工具 │
+│  输入区: [任务目标____] [发送] [■ 取消]       │  / 环境 (/ 用户管理 审计日志)  │
 ├──────────────────────────────────────────────┤                               │
 │ Chat 对话视图                                 │                               │
 │  🧑 气泡 ···  🤖 气泡（逐 token 增长）        │                               │
 │  输入区: [消息____] [清空对话] [发送] [■停止] │                               │
 └──────────────────────────────────────────────┴───────────────────────────────┘
+（多用户模式未登录时：全屏登录浮层盖住界面，登录成功后进入）
 ```
 
 ### 4.1 顶栏
@@ -112,6 +116,7 @@ myagent\Scripts\python.exe -m interface.webui --desktop --mock --token # 桌面�
 - **访问令牌**：服务启用 `--token` 时，从 `?token=` 分享链接或 localStorage 取令牌自动注入请求并清洗地址栏（见 §6”访问令牌”）。
 - **主题切换（🌙/☀）**：`html[data-theme=”dark”]` 切换深浅色（全量 CSS 变量化，约 50 个 token）；localStorage `ui_theme` 记忆，首次访问跟随系统 `prefers-color-scheme`；`theme.js` 置于 `<head>` 尽早执行防闪白。
 - **语言切换（EN/中）**：界面中英双语（`i18n.js`，中文原文即键设计）；localStorage `ui_lang` 记忆，首次访问跟随浏览器语言；切换后静态框架即时翻译、动态面板经 `onI18nChange` 重渲染。
+- **用户徽标 / 退出（多用户模式）**：登录后显示 `🛡️ admin` / `👤 用户名` 徽标与「退出」按钮（见 §4.9）；单用户模式完全隐藏。
 
 ### 4.2 Agent 任务视图
 每次任务 = 一条「用户气泡 + Agent 卡片」，卡片内按 SSE 事件实时追加：
@@ -165,6 +170,15 @@ myagent\Scripts\python.exe -m interface.webui --desktop --mock --token # 桌面�
 - 已配置列表项：状态灯（🟢 启用 / ⏸ 停用）· 名称 · 来源（市场 / 自定义）· 命令行预览；行操作「测试」（真实拉起 stdio 服务器并发现工具，toast 报告工具数与前几个名字；超时 / 坏命令给可读错误）「停用/启用」「删除」。
 - 市场目录（内置静态清单 7 条）：本地工具集（内置，离线可用）/ Everything / Filesystem / Memory / Sequential Thinking（npx，需 node）/ Fetch / Time（uvx，需 uv）；条目显示标题 · 运行依赖 · 描述，行操作「安装」（一键加入已配置；已安装显示「已安装」）。
 - 安装 / 启停即对后续 mcp 框架任务生效（适配器每次运行时重新加载），无需重启服务；配置落盘 `memory/mcp_servers.json`（`AGENT_MCP_SERVERS_JSON` 可覆盖）。
+- 多用户模式下普通用户本区转**只读**（添加表单与行操作隐藏，仅可查看列表与市场目录），写操作服务端亦拒绝（403）。
+
+### 4.9 多用户登录与权限（`--auth-users` 启用；默认关闭零影响）
+
+- **启动探测**：前端 `GET /api/auth/me`——404 即单用户模式（界面零变化）；401 即多用户模式未登录，弹出全屏登录浮层（用户名 + 密码，错误行内提示「用户名或密码错误」）。
+- **登录会话**：`POST /api/auth/login` 成功返回会话令牌（前端存 localStorage 并置 `webui_token` cookie，与既有令牌通道共用——fetch 走 Bearer 头、EventSource 走 cookie）；服务端同时下发 httponly cookie；顶栏出现用户徽标，「退出」调 `POST /api/auth/logout` 撤销会话并清凭据回到浮层。
+- **角色**：admin 全权；user 禁入「用户管理」「审计日志」，MCP / 插件区转只读（服务端写操作 403 并记审计）。
+- **admin 侧栏面板**：「用户管理」（添加用户：名称 / 密码 / 角色；列表行操作「改密」（prompt 输入新密码）「升为管理员/降为用户」「删除」——不能删除自己，删号即踢该用户全部会话）；「审计日志」（刷新拉取最近 100 条，倒序显示：用户 · 动作 · 对象 + 时间与详情，失败行标 ✗）。
+- **数据隔离**：任务 / 定时计划按 `owner` 归属——普通用户只见自己的与遗留无主数据，他人资源一律 404（不暴露存在性）；admin 全量可见（历史列表行对有主任务附 owner 名）。
 
 ---
 
@@ -219,7 +233,16 @@ Base：`http://127.0.0.1:8100`
 | DELETE | `/api/kb/{doc_id}` | 移除文档（404 `not_found`） |
 | GET | `/api/kb/search` | BM25 检索（`?q=&k=4` → 命中片段带相关度） |
 | GET | `/api/tasks/{id}/events` | SSE 任务事件流（`after_seq` / `Last-Event-ID` 续传 + 15s 心跳） |
-| GET | `/api/health` `/health` | 健康检查 |
+| GET | `/api/health` `/health` | 健康检查（多用户模式额外返回 `users: true`） |
+| POST | `/api/auth/login` | 登录（`{username, password}` → `{token, user, role}` + httponly cookie；401 `invalid_credentials`）——仅多用户模式存在 |
+| GET | `/api/auth/me` | 当前会话（`{user, role}`；探测 404=单用户模式 / 401=未登录） |
+| POST | `/api/auth/logout` | 撤销当前会话并清除 cookie |
+| GET | `/api/users` | 用户列表（仅 admin） |
+| POST | `/api/users` | 添加用户（`{username, password, role}`；密码 ≥6 位；重名 422 `invalid_user`） |
+| POST | `/api/users/{name}/password` | 重置密码（仅 admin；404 `user_not_found`） |
+| POST | `/api/users/{name}/role` | 切换角色（仅 admin） |
+| DELETE | `/api/users/{name}` | 删除用户（仅 admin；不能删自己 422 `cannot_delete_self`；该用户会话立即失效） |
+| GET | `/api/audit` | 审计日志（仅 admin；`?limit=` 1..1000，默认 200，新→旧） |
 
 关键请求体：
 
@@ -236,6 +259,8 @@ POST /api/chat/stream  {"model": "qwen3.5-9b-chat", "messages": [{"role": "user"
 错误约定：REST 错误统一 `{"error": {"code", "message"}}`；运行期 / 对话错误经 SSE `error` 事件下发，不断流。
 
 访问令牌（`--token` 启用时生效；未启用则零影响）：`/api/*` 与 `/health` 需携带令牌，四通道任一即可——`Authorization: Bearer <令牌>`（前端 fetch 注入）、`X-Auth-Token` 头、`webui_token` cookie（前端为 EventSource 置同源 cookie）、`?token=<令牌>` 查询参数（curl / 首次分享链接）。无效或缺失返回 `401 {"error": {"code": "unauthorized", ...}}` + `WWW-Authenticate: Bearer`（比较用 `hmac.compare_digest` 常数时间）；静态页（`/` 与 `/static/*`）公开。`/api/health` 额外返回 `auth` 布尔字段。
+
+多用户鉴权（`--auth-users` 启用时生效，优先于令牌模式）：同一四通道携带**会话令牌**；`/api/auth/login` 公开，其余未登录 401、角色不足 403（并记审计 `forbidden`）；登录 / 登出 / 用户管理 / 审计均为审计埋点（JSONL，见 §8）。未启用时上述端点不存在（404），单令牌 / 无鉴权行为完全不变。
 
 ---
 
@@ -336,9 +361,10 @@ LangGraph 路径（`planner/agent.py` 的 `run()` 循环内）：
 ```
 interface/webui/
 ├── __init__.py      # 导出 create_app()
-├── __main__.py      # CLI: python -m interface.webui [--host][--port][--mock][--workers N][--token][--open][--desktop]
+├── __main__.py      # CLI: python -m interface.webui [--host][--port][--mock][--workers N][--token][--auth-users [FILE]][--add-user N:P[:ROLE]][--open][--desktop]
 ├── desktop.py       # 桌面壳: 临时端口 uvicorn 守护线程 + /health 就绪轮询 + pywebview 窗口
-├── app.py           # FastAPI 路由 + SSE 生成器 + 静态托管 + 模型/对话代理 + 访问令牌中间件
+├── app.py           # FastAPI 路由 + SSE 生成器 + 静态托管 + 模型/对话代理 + 访问令牌/多用户中间件
+├── users.py         # 多用户: UserStore (PBKDF2) / SessionManager (24h 内存会话) / AuditLog (JSONL 轮转)
 ├── tasks.py         # TaskManager: 串行队列 / 任务快照 / 事件缓冲 / 协作取消 / 历史落盘
 ├── chat.py          # Chat 流式代理 (modelservice → delta/done/error)
 ├── test_e2e.py      # 冒烟验收脚本 (离线自动降级)
@@ -349,6 +375,8 @@ interface/webui/
 ├── test_auth.py     # 访问令牌冒烟 (通道 / 保护范围 / 401 语义 / 解析, 31 项, 离线)
 ├── test_desktop.py  # 桌面壳冒烟 (端口 / 服务就绪 / 令牌探活 / 缺依赖兜底 / CLI, 13 项, 离线)
 ├── test_mcp_market.py # MCP 市场冒烟 (store / 加载优先级 / REST / 真实连接测试, 47 项, 离线)
+├── test_auth_users.py # 多用户冒烟 (核心 / 认证 REST / 角色 / 数据隔离 / 审计 / 兼容, 74 项, 离线)
+├── test_users_ui.js  # 多用户前端冒烟 (结构 / i18n 词条 / 接线断言 / CSS, 29 项; node 运行)
 ├── test_markdown.js # Markdown 渲染器冒烟 (解析结构 / XSS / 渲染, 25 项; node 运行)
 ├── test_theme_i18n.js # 主题 / 多语言冒烟 (纯函数 / 持久化 / 字典完备性 / CSS 变量化, 42 项; node 运行)
 ├── test_voice.js    # 语音输入 / 朗读冒烟 (特性检测 / 纯函数 / 生命周期 / 接线, 32 项; node 运行)
@@ -358,6 +386,7 @@ interface/webui/
 - **TaskManager**：`queue.Queue` + N 个 daemon 工作线程（默认 1，`--workers N` 开启并行；事件写入持任务级锁）；任务历史最近 50 条，终态任务原子落盘 `memory/ui_tasks.json`（启动恢复；mock 单独 `ui_tasks.mock.json`）；`thread_id` 透传 / 回填 / 按检查点库校验的恢复清洗（多轮续跑，重启可续）；`--mock` 用 `ScriptedLLM` 离线演示；审批请求阻塞等待（`APPROVAL_TIMEOUT=120s` 超时自动拒绝，任务取消优先）。
 - **chat.py**：httpx 流式转发 `/v1/chat/completions`，读超时 600s（覆盖模型懒加载）；上游异常转 `error` 事件，不抛出。
 - **MCP 市场**：`planner/adapters/mcp_store.py` 的 `McpStore`（原子落盘 `memory/mcp_servers.json`，校验 / 容量 fail-safe）+ 内置 `CATALOG` 静态清单；`mcp_agent._load_server_configs` 按「env 显式文件 → store（enabled 过滤）→ 默认 local」优先级加载；`test_server_connect()` 独立线程事件循环真实拉起 stdio 服务器发现工具（uvicorn loop 内不能 `asyncio.run`）。
+- **多用户**：`users.py` 的 `UserStore`（PBKDF2-SHA256 12 万轮哈希，原子落盘 `memory/users.json`，`AGENT_USERS_FILE` 可覆盖）、`SessionManager`（内存会话 24h TTL，Bearer / cookie 双通道）、`AuditLog`（JSONL 追加 10k 行轮转，`AGENT_AUDIT_FILE` 可覆盖）；app.py 按 `users_file` 是否传入切换双模式中间件（users → token → 开放），任务 / 定时计划快照携带 `owner`（`_can_access`：admin 全量，user 限本人 + 无主遗留数据）。
 
 ---
 
@@ -575,6 +604,22 @@ interface/webui/
 | `interface/webui/static/style.css` | 录音态 `.listening` 脉动样式（复用 `--err-strong` token） | 追加 |
 | `interface/webui/test_voice.js` | 新增离线冒烟（32 项） | 独立运行 |
 
+（2026-10 多用户 / 权限 / 审计：追加改动）
+
+| 位置 | 改动 | 兼容性 |
+| :--- | :--- | :--- |
+| `interface/webui/users.py` | 新增：`UserStore`（PBKDF2 哈希 + 原子落盘 + `seed_admin`）、`SessionManager`（内存会话 24h TTL / `revoke_user`）、`AuditLog`（JSONL 10k 轮转） | 新文件 |
+| `interface/webui/app.py` | `create_app(..., users_file=None)`：users 模式注册鉴权中间件（login 公开 / 401 / 403+审计）与 auth / users / audit REST；任务 / 定时计划 `owner` 归属与 `_can_access` 隔离（他人 404）；memory / kb / mcp 写操作审计埋点；`/api/health` 增 `users` 字段 | 默认 None ⇒ 不注册，行为完全不变 |
+| `interface/webui/__main__.py` | `--auth-users [FILE]`（账号文件为空自动 seed 初始 admin 并打印密码）、`--add-user NAME:PASSWORD[:ROLE]`（添加后退出）；users 模式 `--token` 忽略并告警 | 默认未启用 ⇒ 旧命令行为不变 |
+| `interface/webui/desktop.py` | `run_desktop(..., users_file=None)` 透传 | 默认 None |
+| `interface/webui/static/index.html` | 登录浮层（`#login-overlay`）；顶栏用户徽标 + 退出按钮（默认 hidden）；侧栏「用户管理」「审计日志」admin 区（默认 hidden） | 单用户模式全隐藏 |
+| `interface/webui/static/app.js` | 启动探测 `probeAuth()`（404=单用户零变化）；登录 / 退出 / 会话凭据复用令牌通道；`applyAuthUi`（浮层 / 徽标 / admin 区显隐 / MCP 只读）；`loadUsers` / `loadAudit` 面板；401 处理按模式分流 | 未登录前不拉业务数据 |
+| `interface/webui/static/i18n.js` | 登录 / 用户 / 审计词条（zh+en） | 追加 |
+| `interface/webui/static/style.css` | 登录浮层 / 登录卡片 / 用户徽标样式（全 CSS 变量） | 纯新增 |
+| `interface/webui/test_auth_users.py` | 新增离线冒烟（74 项：PBKDF2 / 会话过期 / 登录 REST / 角色矩阵 / owner 隔离 / 审计 / 单用户与令牌模式兼容） | 独立运行 |
+| `interface/webui/test_users_ui.js` | 新增前端离线冒烟（29 项：HTML 结构 / i18n 词条完备 / 接线断言 / CSS 变量化） | 独立运行 |
+| `interface/webui/test_tasks_persist.py` | 修正陈旧断言：检查点 SQLite 落盘后恢复任务保留 `thread_id`（续跑标识）为预期行为 | 测试修正 |
+
 ---
 
 ## 10. 验收与已知限制
@@ -596,12 +641,14 @@ myagent\Scripts\python.exe -m interface.webui.test_observability   # 离线, 无
 myagent\Scripts\python.exe -m interface.webui.test_memory          # 离线, 无需起服务 (长期记忆)
 myagent\Scripts\python.exe -m interface.webui.test_knowledge       # 离线, 无需起服务 (知识库 RAG)
 myagent\Scripts\python.exe -m interface.webui.test_mcp_market      # 离线, 无需起服务 (MCP 市场; 含真实 stdio 连接测试)
+myagent\Scripts\python.exe -m interface.webui.test_auth_users      # 离线, 无需起服务 (多用户 / 权限 / 审计)
 myagent\Scripts\python.exe -m interface.webui --desktop --mock     # 桌面窗口实跑 (弹出窗口, 关窗即退出)
 myagent\Scripts\python.exe -m planner.test_graph                   # 离线, 无需起服务 (图终止性)
 node interface/webui/test_markdown.js                              # 离线, 需 Node (md.js 渲染器)
 node interface/webui/test_multimodal.js                            # 离线, 需 Node (multimodal.js 工具)
 node interface/webui/test_theme_i18n.js                            # 离线, 需 Node (主题 / 多语言)
 node interface/webui/test_voice.js                                 # 离线, 需 Node (语音输入 / 朗读)
+node interface/webui/test_users_ui.js                              # 离线, 需 Node (多用户前端)
 ```
 
 - 离线（mock）：端点 / 事件序列 `queued→started→thought→tool→tool_result→result→close` / 取消 / 续传兜底 / 边界；
@@ -616,6 +663,7 @@ node interface/webui/test_voice.js                                 # 离线, 需
 - MCP 市场：`interface/webui/test_mcp_market.py`（离线，47 项，含真实拉起 local 服务器发现 8 个工具）+ 浏览器端到端（市场安装 → 「测试」toast 工具清单 → 停用 ⏸ → 自定义添加 → 删除 → 空态）；npx/uvx 目录条目在装有 node/uv 的机器上可同样实测。
 - 深色主题 / 多语言：`node interface/webui/test_theme_i18n.js`（离线，42 项）+ 浏览器端到端（🌙 切换与刷新持久、暗色 `color-scheme` 生效、EN 切换静态框架与动态 toast 全翻译、往返切换无残留、无 JS 错误）。
 - 语音输入 / 朗读：`node interface/webui/test_voice.js`（离线，32 项）+ 浏览器端到端（桩 `SpeechRecognition` 驱动听写全流程：interim 预览 → 定稿填入 → 取消恢复原文 → 权限拒绝 toast；桩 `speechSynthesis` 验证 🔊 启停；无 JS 错误）。真实麦克风识别 / 朗读音色需人工在 Chrome/Edge 复验。
+- 多用户 / 权限 / 审计：`interface/webui/test_auth_users.py`（离线，74 项）+ `node interface/webui/test_users_ui.js`（离线，29 项）+ 浏览器端到端（`--auth-users` 起服务：未登录浮层 → 错误密码行内提示 → admin 登录见徽标与用户管理 / 审计面板 → 退出回浮层 → 普通用户登录 admin 区隐藏、MCP 只读、跑通任务）。改密 / 删号踢会话 / 会话 24h 过期为服务端逻辑，离线测试覆盖；真实浏览器多端并发登录需人工复验。
 
 ### 10.2 已知限制
 
@@ -636,3 +684,4 @@ node interface/webui/test_voice.js                                 # 离线, 需
 15. MCP 市场：目录为内置静态清单（非在线商店，更新需发版）；npx/uvx 条目需机器装有 node / uv，且首次运行会在线拉包（未装依赖时「测试」给可读超时错误）；`memory/mcp_servers.json` 为明文单文件（env 值含敏感变量时注意）；MCP 服务器以当前用户权限运行子进程（安装第三方服务器前自行评估其来源可信）；连接测试超时 15s（慢启动服务器可能误报超时，可重试）。
 16. 主题 / 多语言：仅界面文案双语——后端返回的动态字符串（框架与工具描述、MCP 服务器错误消息、模型名等）保持原文（中文），不翻译；`t()` 未命中词条时原样返回（新文案忘记加词条不会报错，只会不翻译——`test_theme_i18n.js` 的字典完备性断言防漏）；语言 / 主题偏好存 localStorage（按浏览器 per-origin，不跨浏览器 / 不随账号）；暗色仅覆盖本项目 CSS（浏览器原生控件深浅由 `color-scheme` 粗粒度控制）。
 17. 语音输入 / 朗读：依赖浏览器 Web Speech API——Chrome / Edge 支持（Firefox / Safari 不支持 SpeechRecognition），不支持或非安全上下文（局域网明文 HTTP 访问即非安全上下文，localhost / 桌面壳除外）时 🎤 按钮自动隐藏；Chrome 的语音识别音频发往 Google 云端、Edge 发往 Azure（内网 / 隐私敏感场景勿用）；识别准确率与断句由浏览器语音服务决定（无本地离线识别）；朗读音色 / 语速取浏览器默认（`speechSynthesis` 本地或云端声库），长文本朗读无进度控制（只能整体停止）；语音功能无服务端参与（不落盘、不进任务事件）。
+18. 多用户 / 权限 / 审计：默认关闭（`--auth-users` 显式启用），与单令牌模式互斥（同启时令牌被忽略并告警）；会话为进程内存态——服务重启后全部失效需重新登录（令牌落盘可考虑后续演进）；审计日志为追加 JSONL（10k 行轮转，重启不清零）；数据隔离仅覆盖任务与定时计划——长期记忆 / 知识库 / MCP 配置 / 检查点线程为全局共享（普通用户可读写，多用户敏感场景勿放入个人数据）；多用户模式仍为明文 HTTP 局域网（密码与令牌经网传输，生产需 HTTPS 自担）；用户凭据存 `memory/users.json`（PBKDF2 哈希，文件本身需自行保护）；`--add-user` 与 seed admin 的初始密码在终端打印一次（妥善保管）。

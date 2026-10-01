@@ -121,10 +121,12 @@ def main() -> None:
               and r2[0]["status"] == "finished", str(r2))
         snap_re = m2.snapshot(t1.task_id)
         expect_result = dict(snap1["result"] or {})
-        expect_result.pop("thread_id", None)  # 检查点随进程消亡, 恢复时清洗续跑痕迹
-        check("重启后快照与落盘前一致 (仅清洗续跑痕迹)", snap_re is not None
+        # 检查点已 SQLite 落盘 (mock 演示共用共享库): thread_id 保留 → 重启后仍可续跑;
+        # 仅当检查点库中无该线程 (库被删/损坏) 时恢复路径才清洗续跑痕迹
+        check("重启后快照与落盘前一致 (检查点在, 续跑标识保留)", snap_re is not None
               and [e["seq"] for e in snap_re["events"]] == [e["seq"] for e in snap1["events"]]
-              and snap_re["result"] == expect_result)
+              and snap_re["result"] == expect_result
+              and snap_re["result"].get("thread_id") == (snap1["result"] or {}).get("thread_id"))
         q, backlog = m2.subscribe(t1.task_id, 0)
         check("重启后回看事件可重放", q is None and len(backlog) == len(snap_re["events"]))
         check("重启后终态任务不可取消", m2.cancel(t1.task_id) is False)

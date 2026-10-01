@@ -75,6 +75,7 @@ class Task:
     status: str = "queued"  # queued | running | finished | error | max_steps_exceeded | cancelled
     thread_id: Optional[str] = None   # 多轮对话标识 (langgraph 检查点; None = 新线程或不支持)
     images: Optional[list[str]] = None   # 随任务附上的图片 (data URL; 多模态, 不落盘)
+    owner: Optional[str] = None   # 提交用户 (多用户模式; None = 单用户模式或历史遗留)
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
@@ -99,6 +100,7 @@ class Task:
             "created_at": self.created_at,
             "steps": (self.result or {}).get("steps"),
             "image_count": len(self.images or []),
+            "owner": self.owner,
             "metrics": task_metrics(self),
         }
 
@@ -130,12 +132,14 @@ class TaskManager:
     def submit(self, goal: str, framework: str, model: Optional[str],
                max_steps: Optional[int],
                thread_id: Optional[str] = None,
-               images: Optional[list[str]] = None) -> tuple[Task, int]:
+               images: Optional[list[str]] = None,
+               owner: Optional[str] = None) -> tuple[Task, int]:
         """入队新任务; 返回 (任务, 排队位次)。thread_id 非空时续跑该会话。"""
         task = Task(
             task_id=f"t-{uuid.uuid4().hex[:8]}",
             goal=goal, framework=framework, model=model, max_steps=max_steps,
             thread_id=thread_id, images=list(images) if images else None,
+            owner=owner,
         )
         self._tasks[task.task_id] = task
         self._order.append(task.task_id)
@@ -274,6 +278,7 @@ class TaskManager:
             "max_steps": t.max_steps,
             "thread_id": t.thread_id,
             "image_count": len(t.images or []),
+            "owner": t.owner,
             "status": t.status,
             "created_at": t.created_at,
             "started_at": t.started_at,
@@ -321,6 +326,7 @@ class TaskManager:
                     started_at=e.get("started_at"), finished_at=e.get("finished_at"),
                     events=events,
                     result=result, stream_closed=True,
+                    owner=e.get("owner"),
                 )
                 task.seq = max((int(ev.get("seq", 0)) for ev in task.events), default=0)
                 task.thread_id = restored_thread

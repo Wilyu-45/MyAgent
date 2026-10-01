@@ -62,11 +62,13 @@ def _serve(app, *, token: str | None = None) -> tuple:
 
 
 def run_desktop(*, mock: bool = False, workers: int = 1, token: str | None = None,
+                users_file: str | None = None,
                 title: str = "Agent 交互界面", width: int = 1280, height: int = 820) -> int:
     """起服务并打开桌面窗口; 阻塞至窗口关闭。返回进程退出码。"""
     from .app import create_app
 
-    server, url = _serve(create_app(mock=mock, workers=workers, token=token), token=token)
+    server, url = _serve(create_app(mock=mock, workers=workers, token=token,
+                                    users_file=users_file), token=token)
     try:
         import webview
     except ImportError:
