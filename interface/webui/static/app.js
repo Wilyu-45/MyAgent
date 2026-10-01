@@ -135,6 +135,8 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btn-chat-clear").addEventListener("click", chatClear);
   goalImages = makeImagePicker("goal-img-strip", "btn-goal-img", "file-goal", "inp-goal", "btn-goal-shot");
   chatImages = makeImagePicker("chat-img-strip", "btn-chat-img", "file-chat", "inp-chat", "btn-chat-shot");
+  setupVoice("btn-goal-voice", "inp-goal");
+  setupVoice("btn-chat-voice", "inp-chat");
   $("btn-sched-add").addEventListener("click", addSchedule);
   $("sel-sched-kind").addEventListener("change", schedKindChanged);
   loadSchedules();
@@ -254,6 +256,65 @@ function bindKeys() {
       }
     });
   }
+}
+
+/* ==================== 语音输入 (Web Speech API) ==================== */
+/* 🎤 点击开始识别 / 再点或 Esc 取消; interim 实时预览进输入框,
+ * 定稿合并进原有文本; 不支持的环境按钮保持 hidden。 */
+function setupVoice(btnId, taId) {
+  const btn = $(btnId), ta = $(taId);
+  if (!btn || !ta || !Voice.supported()) return;
+  btn.hidden = false;
+  let session = null;
+  let base = "";
+  const resetBtn = () => { btn.classList.remove("listening"); btn.textContent = "🎤"; };
+  const stop = () => {
+    if (!session) return;
+    const s = session;
+    session = null;
+    resetBtn();
+    s.abort();   // 触发 onEnd: 未识别则恢复原文, 已有定稿则保留
+  };
+  btn.addEventListener("click", () => {
+    if (session) { stop(); return; }
+    base = ta.value;
+    session = Voice.startSession({
+      onInterim: (interim, finalAccum) => {
+        const done = Voice.mergeTranscript(base, finalAccum);
+        ta.value = interim ? (done ? done + " " + interim : interim) : done;
+      },
+      onError: (ev) => {
+        const err = ev && ev.error;
+        if (err === "not-allowed" || err === "service-not-allowed") toast(t("麦克风权限被拒绝"));
+        else if (err === "no-speech") toast(t("未听到语音"));
+        else if (err && err !== "aborted") toast(t("语音识别失败: {0}", err));
+      },
+      onEnd: (finalAccum) => {
+        session = null;
+        resetBtn();
+        ta.value = Voice.mergeTranscript(base, finalAccum);
+        ta.focus();
+      },
+    });
+    if (!session) return;
+    btn.classList.add("listening");
+    btn.textContent = "🔴";
+  });
+  ta.addEventListener("keydown", (e) => { if (e.key === "Escape") stop(); });
+}
+
+/* Chat 助手气泡 🔊 朗读 (speechSynthesis); 朗读中再点停止。 */
+function bindSpeakButton(acts, getBubble) {
+  if (!Voice.ttsSupported()) return;
+  const sp = el("button", "mini", "🔊");
+  sp.title = t("朗读此回答");
+  const reset = () => { sp.textContent = "🔊"; };
+  sp.addEventListener("click", () => {
+    if (Voice.speaking()) { Voice.stopSpeaking(); reset(); return; }
+    const ok = Voice.speak(getBubble().innerText, { onend: reset, onerror: reset });
+    if (!ok) toast(t("朗读失败"));
+  });
+  acts.appendChild(sp);
 }
 
 /* ==================== 模式切换 ==================== */
@@ -1264,6 +1325,7 @@ function appendChatRow(role, who, text, images) {
     rt.title = t("重新生成此回答 (丢弃此回答之后的对话)");
     rt.addEventListener("click", () => chatRetry(row));
     acts.appendChild(rt);
+    bindSpeakButton(acts, () => b);
   }
   row.appendChild(acts);
   $("chat-messages").appendChild(row);
@@ -1453,6 +1515,7 @@ function chatStop() {
 
 function chatClear() {
   if (chatBusy) { toast("生成中, 请先停止"); return; }
+  Voice.stopSpeaking();
   chatRows.length = 0;
   const box = $("chat-messages");
   box.replaceChildren();

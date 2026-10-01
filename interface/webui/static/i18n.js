@@ -50,6 +50,7 @@ const I18N_EN = {
   "title.sidebar": "Sidebar",
   "title.theme": "Toggle dark / light theme",
   "title.lang": "切换语言 / Switch language",
+  "title.voice": "Voice input (auto-fills when done; click again or Esc to cancel)",
 
   /* —— 动态文案 (中文原文作 key) —— */
   "排队中": "Queued",
@@ -188,6 +189,11 @@ const I18N_EN = {
   "未检测到模型服务": "Model service not detected",
   "已连接模型服务": "Connected to model service",
   "重试失败": "Retry failed",
+  "麦克风权限被拒绝": "Microphone permission denied",
+  "未听到语音": "No speech detected",
+  "语音识别失败: {0}": "Speech recognition failed: {0}",
+  "朗读此回答": "Read this reply aloud",
+  "朗读失败": "Read-aloud failed",
   "暂停该计划 (不删除)": "Pause this schedule (keep it)",
   "重新启用该计划": "Re-enable this schedule",
   "删除": "Delete",
@@ -246,7 +252,7 @@ const I18N_ZH = {
   "ph.mcp.args": "参数 (空格分隔, 可选)",
   "title.sidebar": "侧栏",
   "title.theme": "切换深色/浅色主题",
-  "title.lang": "切换语言 / Switch language",
+  "title.voice": "语音输入 (说完自动填入, 再点或 Esc 取消)",
 };
 
 function resolveLang(saved, navigatorLanguage) {

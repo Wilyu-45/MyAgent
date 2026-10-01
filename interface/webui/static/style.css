@@ -445,6 +445,8 @@ button.primary:hover:not(:disabled) { background: var(--accent-strong); }
 button.danger { background: var(--err-strong); border-color: var(--err-strong); color: var(--on-accent); }
 button.danger:hover:not(:disabled) { background: var(--err); }
 button.ghost { border: none; background: transparent; font-size: 16px; padding: 6px 10px; }
+button.ghost.listening { color: var(--err-strong); animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
 
 /* ---------- 侧栏 ---------- */
 .list { display: flex; flex-direction: column; gap: 4px; }

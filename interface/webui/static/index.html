@@ -45,6 +45,7 @@
       <div class="composer-actions">
         <button id="btn-goal-img" class="ghost" title="添加图片 (png/jpg/gif/webp, 最多 4 张, 可粘贴/拖入)">📎</button>
         <button id="btn-goal-shot" class="ghost" title="屏幕截图 (选择窗口/屏幕后作为图片附加)">📷</button>
+        <button id="btn-goal-voice" class="ghost" data-i18n-title="title.voice" title="语音输入 (说完自动填入, 再点或 Esc 取消)" hidden>🎤</button>
         <input id="file-goal" type="file" accept="image/png,image/jpeg,image/jpg,image/gif,image/webp" multiple hidden>
         <button id="btn-send" class="primary" data-i18n="btn.send">发送</button>
         <button id="btn-cancel" class="danger" hidden data-i18n="btn.cancel">■ 取消</button>
@@ -67,6 +68,7 @@
       <div class="composer-actions">
         <button id="btn-chat-img" class="ghost" title="添加图片 (png/jpg/gif/webp, 最多 4 张, 可粘贴/拖入)">📎</button>
         <button id="btn-chat-shot" class="ghost" title="屏幕截图 (选择窗口/屏幕后作为图片附加)">📷</button>
+        <button id="btn-chat-voice" class="ghost" data-i18n-title="title.voice" title="语音输入 (说完自动填入, 再点或 Esc 取消)" hidden>🎤</button>
         <input id="file-chat" type="file" accept="image/png,image/jpeg,image/jpg,image/gif,image/webp" multiple hidden>
         <button id="btn-chat-clear" data-i18n="btn.clear" title="清空当前对话 (仅前端保存)">清空对话</button>
         <button id="btn-chat-send" class="primary" data-i18n="btn.send">发送</button>
@@ -134,6 +136,7 @@
 <div id="toast"></div>
 <script src="/static/md.js"></script>
 <script src="/static/multimodal.js"></script>
+<script src="/static/voice.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

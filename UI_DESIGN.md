@@ -1,6 +1,6 @@
 # 智能体交互界面设计（Web · Agent 任务 + Chat 对话）
 
-> 状态：**已实现**（2026-09；双模式 + 框架逐步流式 + 任务历史落盘 + 操作审批卡片 + 多任务并行开关 + Chat 增强 + 多轮对话续跑 + 访问令牌与局域网访问 + 图片输入（多模态）+ 定时/触发任务 + 长期记忆 + 知识库 RAG + 任务指标 + MCP 市场 + 深色主题/多语言（2026-10）；验收脚本 `interface/webui/test_e2e.py`、`planner/adapters/test_runner_stream.py`、`interface/webui/test_tasks_persist.py`、`interface/webui/test_approval.py`、`interface/webui/test_workers.py`、`interface/webui/test_multiturn.py`、`interface/webui/test_auth.py`、`interface/webui/test_multimodal.py`、`interface/webui/test_schedules.py`、`planner/test_graph.py` 与 `interface/webui/test_markdown.js`、`interface/webui/test_multimodal.js`、`interface/webui/test_theme_i18n.js`（node 离线），浏览器端到端复验通过）
+> 状态：**已实现**（2026-09；双模式 + 框架逐步流式 + 任务历史落盘 + 操作审批卡片 + 多任务并行开关 + Chat 增强 + 多轮对话续跑 + 访问令牌与局域网访问 + 图片输入（多模态）+ 定时/触发任务 + 长期记忆 + 知识库 RAG + 任务指标 + MCP 市场 + 深色主题/多语言 + 语音输入/朗读（2026-10）；验收脚本 `interface/webui/test_e2e.py`、`planner/adapters/test_runner_stream.py`、`interface/webui/test_tasks_persist.py`、`interface/webui/test_approval.py`、`interface/webui/test_workers.py`、`interface/webui/test_multiturn.py`、`interface/webui/test_auth.py`、`interface/webui/test_multimodal.py`、`interface/webui/test_schedules.py`、`planner/test_graph.py` 与 `interface/webui/test_markdown.js`、`interface/webui/test_multimodal.js`、`interface/webui/test_theme_i18n.js`、`interface/webui/test_voice.js`（node 离线），浏览器端到端复验通过）
 > 代码位置：`interface/webui/`（用户交互层）；后续规划见 `ROADMAP.md`
 > 关联：`framework.md`（总体架构）、`PRINCIPLES.md`（开发原则）、`INTEGRATION.md`（多框架集成）
 
@@ -134,13 +134,14 @@ myagent\Scripts\python.exe -m interface.webui --desktop --mock --token # 桌面�
 ### 4.3 Chat 对话视图
 - 用户 / 助手气泡，助手气泡逐 token 增长（闪烁光标）；「停止」（AbortController）保留已生成部分。
 - 助手回答按 Markdown 渲染（零依赖自实现 `static/md.js`：标题 / 列表 / 代码块 / 引用 / 粗体斜体 / 链接等子集；解析为纯函数，DOM 逐节点构建防 XSS，流式期间每帧至多重绘一次）；用户消息可附图片（气泡内缩略条；编辑重发仅改文字、保留原附件）。
-- 行操作（悬停显示）：助手回答「↻ 重试」、用户消息「✎ 编辑」——均丢弃其后的对话后重发；消息历史由对话行实时派生（行即真相，空内容行不入历史；用户行带图片时派生为多模态 content parts）。
+- 行操作（悬停显示）：助手回答「↻ 重试」+「🔊 朗读」（`speechSynthesis`，朗读中再点停止；清空对话自动停止）、用户消息「✎ 编辑」——编辑/重试均丢弃其后的对话后重发；消息历史由对话行实时派生（行即真相，空内容行不入历史；用户行带图片时派生为多模态 content parts）。
 - 对话历史仅保存在前端内存（服务端无状态）；「清空对话」即丢弃。
 - 出错时助手气泡标红并 toast；模型服务离线时禁止发送。
 
 ### 4.4 侧栏与输入区
 - 侧栏：任务历史（最近 50 条，落盘 `memory/ui_tasks.json`，点击回看；带图任务显示 🖼 张数徽标）/ 定时任务（管理区，见 §4.5）/ 长期记忆（管理区，见 §4.6）/ 知识库（管理区，见 §4.7）/ MCP · 插件（管理区，见 §4.8）/ 可用工具 / 环境；<900px 折叠为抽屉。
 - 输入区：Enter 发送 / Shift+Enter 换行；Agent 运行中显示「取消」；📎 添加图片（选择 / 粘贴 / 拖拽，缩略预览可移除；png/jpg/gif/webp，最多 4 张、单张 ≤5MB）；📷 屏幕截图（浏览器 `getDisplayMedia` 选择窗口/屏幕 → 抓帧为 JPEG data URL 入列，超限自动降采样，不支持 / 取消时 toast 提示），发送后清空。
+- 🎤 语音输入（任务 / Chat 双输入区，`static/voice.js`，Web Speech API）：点击开始识别（按钮变 🔴 脉动），识别中 interim 实时预览进输入框，说完自动定稿合并进原有文本；再点或 Esc 取消（未识别恢复原文）；识别语言随界面语言（zh-CN / en-US）；错误分类提示（权限拒绝 / 无语音 / 网络）；不支持的环境（Firefox、非安全上下文的局域网 HTTP 等）按钮自动隐藏。
 
 ### 4.5 定时任务（侧栏管理区）
 - 计划类型三种：**每 N 分钟**（interval）/ **每日 HH:MM**（daily）/ **cron 表达式**（5 字段：分 时 日 月 周，支持 `*` 数字 区间 `a-b` 列表 步进 `*/n`；日+周同时受限按标准 cron 语义取并集）。
@@ -350,7 +351,8 @@ interface/webui/
 ├── test_mcp_market.py # MCP 市场冒烟 (store / 加载优先级 / REST / 真实连接测试, 47 项, 离线)
 ├── test_markdown.js # Markdown 渲染器冒烟 (解析结构 / XSS / 渲染, 25 项; node 运行)
 ├── test_theme_i18n.js # 主题 / 多语言冒烟 (纯函数 / 持久化 / 字典完备性 / CSS 变量化, 42 项; node 运行)
-└── static/          # index.html / style.css / app.js / md.js / multimodal.js / theme.js / i18n.js (原生, 无 CDN)
+├── test_voice.js    # 语音输入 / 朗读冒烟 (特性检测 / 纯函数 / 生命周期 / 接线, 32 项; node 运行)
+└── static/          # index.html / style.css / app.js / md.js / multimodal.js / theme.js / i18n.js / voice.js (原生, 无 CDN)
 ```
 
 - **TaskManager**：`queue.Queue` + N 个 daemon 工作线程（默认 1，`--workers N` 开启并行；事件写入持任务级锁）；任务历史最近 50 条，终态任务原子落盘 `memory/ui_tasks.json`（启动恢复；mock 单独 `ui_tasks.mock.json`）；`thread_id` 透传 / 回填 / 按检查点库校验的恢复清洗（多轮续跑，重启可续）；`--mock` 用 `ScriptedLLM` 离线演示；审批请求阻塞等待（`APPROVAL_TIMEOUT=120s` 超时自动拒绝，任务取消优先）。
@@ -562,6 +564,17 @@ interface/webui/
 | `interface/webui/static/app.js` | 动态文案接入 `t()`（toast 集中处理 + 各面板/事件/指标/Chat 文案）；`onI18nChange` 注册重渲染；按钮接线 | 文案默认中文，行为不变 |
 | `interface/webui/test_theme_i18n.js` | 新增离线冒烟（42 项：纯函数 / 持久化 / 字典完备性 / CSS 变量化） | 独立运行 |
 
+（2026-10 语音输入 / 回答朗读：追加改动，纯前端零依赖）
+
+| 位置 | 改动 | 兼容性 |
+| :--- | :--- | :--- |
+| `interface/webui/static/voice.js` | 新增：Web Speech API 封装（`supported` / `ttsSupported` 特性检测，识别语言随界面语言，`mergeTranscript` / `extractResults` 纯函数，`startSession` 生命周期，`speak` / `stopSpeaking`） | 纯新增，挂 `window.Voice` |
+| `interface/webui/static/index.html` | 任务 / Chat 双输入区 🎤 按钮（默认 `hidden`，支持时显示）+ 引入 voice.js | 不支持环境按钮不可见 |
+| `interface/webui/static/app.js` | `setupVoice()`（录音态 🔴 / interim 预览 / 定稿合并 / Esc 与再点取消 / 错误分类 toast）+ `bindSpeakButton()`（助手气泡 🔊 朗读）+ chatClear 停止朗读 | 按钮隐藏时零行为变化 |
+| `interface/webui/static/i18n.js` | 语音词条（title.voice / 权限拒绝 / 无语音 / 识别失败 / 朗读，zh+en） | 追加 |
+| `interface/webui/static/style.css` | 录音态 `.listening` 脉动样式（复用 `--err-strong` token） | 追加 |
+| `interface/webui/test_voice.js` | 新增离线冒烟（32 项） | 独立运行 |
+
 ---
 
 ## 10. 验收与已知限制
@@ -588,6 +601,7 @@ myagent\Scripts\python.exe -m planner.test_graph                   # 离线, 无
 node interface/webui/test_markdown.js                              # 离线, 需 Node (md.js 渲染器)
 node interface/webui/test_multimodal.js                            # 离线, 需 Node (multimodal.js 工具)
 node interface/webui/test_theme_i18n.js                            # 离线, 需 Node (主题 / 多语言)
+node interface/webui/test_voice.js                                 # 离线, 需 Node (语音输入 / 朗读)
 ```
 
 - 离线（mock）：端点 / 事件序列 `queued→started→thought→tool→tool_result→result→close` / 取消 / 续传兜底 / 边界；
@@ -601,6 +615,7 @@ node interface/webui/test_theme_i18n.js                            # 离线, 需
 - 断点续跑：`interface/webui/test_multiturn.py`（离线，24 项，含重启恢复续跑场景）+ 浏览器端到端（mock 模式跑一轮 → 重启服务 → 历史卡片仍显示「↩ 继续此对话」→ 续跑同 thread 完成）。
 - MCP 市场：`interface/webui/test_mcp_market.py`（离线，47 项，含真实拉起 local 服务器发现 8 个工具）+ 浏览器端到端（市场安装 → 「测试」toast 工具清单 → 停用 ⏸ → 自定义添加 → 删除 → 空态）；npx/uvx 目录条目在装有 node/uv 的机器上可同样实测。
 - 深色主题 / 多语言：`node interface/webui/test_theme_i18n.js`（离线，42 项）+ 浏览器端到端（🌙 切换与刷新持久、暗色 `color-scheme` 生效、EN 切换静态框架与动态 toast 全翻译、往返切换无残留、无 JS 错误）。
+- 语音输入 / 朗读：`node interface/webui/test_voice.js`（离线，32 项）+ 浏览器端到端（桩 `SpeechRecognition` 驱动听写全流程：interim 预览 → 定稿填入 → 取消恢复原文 → 权限拒绝 toast；桩 `speechSynthesis` 验证 🔊 启停；无 JS 错误）。真实麦克风识别 / 朗读音色需人工在 Chrome/Edge 复验。
 
 ### 10.2 已知限制
 
@@ -620,3 +635,4 @@ node interface/webui/test_theme_i18n.js                            # 离线, 需
 14. 知识库（RAG）：BM25 关键词检索无语义/向量能力（同义改写可能不命中，模型可换关键词重试）；扫描件 / 图片型 PDF 无文本层不可抽取（显式报错）；容量 fail-safe（单文档 2MB / 100 篇 / 5000 块，超限需先删旧文档）；知识库为单机单用户明文 JSON（无分片 / 无增量更新——重复导入同名文档会产生重复块）；`search_knowledge` 返回原文片段进上下文（注意 token 占用）。
 15. MCP 市场：目录为内置静态清单（非在线商店，更新需发版）；npx/uvx 条目需机器装有 node / uv，且首次运行会在线拉包（未装依赖时「测试」给可读超时错误）；`memory/mcp_servers.json` 为明文单文件（env 值含敏感变量时注意）；MCP 服务器以当前用户权限运行子进程（安装第三方服务器前自行评估其来源可信）；连接测试超时 15s（慢启动服务器可能误报超时，可重试）。
 16. 主题 / 多语言：仅界面文案双语——后端返回的动态字符串（框架与工具描述、MCP 服务器错误消息、模型名等）保持原文（中文），不翻译；`t()` 未命中词条时原样返回（新文案忘记加词条不会报错，只会不翻译——`test_theme_i18n.js` 的字典完备性断言防漏）；语言 / 主题偏好存 localStorage（按浏览器 per-origin，不跨浏览器 / 不随账号）；暗色仅覆盖本项目 CSS（浏览器原生控件深浅由 `color-scheme` 粗粒度控制）。
+17. 语音输入 / 朗读：依赖浏览器 Web Speech API——Chrome / Edge 支持（Firefox / Safari 不支持 SpeechRecognition），不支持或非安全上下文（局域网明文 HTTP 访问即非安全上下文，localhost / 桌面壳除外）时 🎤 按钮自动隐藏；Chrome 的语音识别音频发往 Google 云端、Edge 发往 Azure（内网 / 隐私敏感场景勿用）；识别准确率与断句由浏览器语音服务决定（无本地离线识别）；朗读音色 / 语速取浏览器默认（`speechSynthesis` 本地或云端声库），长文本朗读无进度控制（只能整体停止）；语音功能无服务端参与（不落盘、不进任务事件）。
